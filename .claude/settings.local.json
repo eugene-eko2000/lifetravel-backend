@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/src)",
+      "Bash(mkdir -p /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/tests)",
+      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/run_local.sh)"
+    ]
+  }
+}

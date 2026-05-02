@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "endpoint-api"
+version = "0.1.0"
+description = "WebSocket endpoint service for trip requests"
+requires-python = ">=3.10"
+dependencies = [
+  "aio-pika",
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.0",
+]
