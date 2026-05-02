@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flight-scraper"
+version = "0.1.0"
+description = "Flight search scraper using browser_use and Claude"
+requires-python = ">=3.11"
+dependencies = [
+  "browser-use==0.12.6",
+  "langchain-anthropic>=0.3.0",
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.0",
+]

@@ -3,7 +3,14 @@
     "allow": [
       "Bash(mkdir -p /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/src)",
       "Bash(mkdir -p /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/tests)",
-      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/run_local.sh)"
+      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/endpoint_api/run_local.sh)",
+      "Bash(pip show *)",
+      "Bash(pip3 show *)",
+      "Bash(python3 -c \"import browser_use; print\\(browser_use.__version__\\)\")",
+      "Bash(pip3 index *)",
+      "Bash(pip3 install *)",
+      "Bash(python3 *)",
+      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/flight_scraper/run_local.sh)"
     ]
   }
 }
