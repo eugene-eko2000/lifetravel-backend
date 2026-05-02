@@ -3,8 +3,8 @@ import logging
 from collections import Counter
 from datetime import datetime, timezone
 
-from browser_use import Agent, Browser, BrowserConfig
-from langchain_anthropic import ChatAnthropic
+from browser_use import Agent, Browser
+from browser_use.llm import ChatAnthropic
 
 from cfg import Cfg
 from models import FlightOffer, FlightSearchInput, FlightSearchResponse, ScrapedFlights
@@ -57,7 +57,25 @@ async def search_flights(search_input: FlightSearchInput) -> FlightSearchRespons
         temperature=0,
     )
 
-    browser = Browser(config=BrowserConfig(headless=cfg.headless))
+    browser = Browser(
+        headless=cfg.headless,
+        # Use real Chrome when available — its fingerprint is far harder to detect
+        # than the bundled Chromium build.
+        channel=cfg.browser_channel,
+        # Remove navigator.webdriver and the "Chrome is being controlled" banner
+        # that every major bot-detection service checks first.
+        args=["--disable-blink-features=AutomationControlled"],
+        ignore_default_args=["--enable-automation"],
+        # Realistic desktop UA matching the Chrome version in use
+        user_agent=(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.0.0 Safari/537.36"
+        ),
+        # Human-like timing: pause between actions and give pages time to settle
+        wait_between_actions=cfg.wait_between_actions,
+        minimum_wait_page_load_time=cfg.min_page_load_wait,
+    )
 
     # Per-run tracking state for cycle detection
     url_visit_counts: Counter[str] = Counter()
@@ -161,7 +179,7 @@ async def search_flights(search_input: FlightSearchInput) -> FlightSearchRespons
             source="unknown",
         )
     finally:
-        await browser.close()
+        await browser.stop()
 
     offers: list[FlightOffer] = scraped.offers or []
     return FlightSearchResponse(
