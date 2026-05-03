@@ -3,7 +3,7 @@ import logging
 import uvicorn
 from fastapi import FastAPI
 
-from cfg import Cfg
+from scraper_common.cfg import Cfg
 from models import FlightSearchInput, FlightSearchResponse
 from scraper import search_flights
 
@@ -41,6 +41,6 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-    cfg = Cfg.from_env()
+    cfg = Cfg.from_env(default_port=8081)
     logger.info("Starting Flight Scraper service on port %d", cfg.port)
     uvicorn.run(app, host="0.0.0.0", port=cfg.port)

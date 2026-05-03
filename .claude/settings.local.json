@@ -14,7 +14,8 @@
       "Bash(.venv/bin/python -c \"from browser_use import BrowserProfile; import inspect; print\\(inspect.getsource\\(BrowserProfile\\)\\)\")",
       "Bash(.venv/bin/python *)",
       "Bash(.venv/bin/pip index *)",
-      "Bash(.venv/bin/pip install *)"
+      "Bash(.venv/bin/pip install *)",
+      "Skill(keybindings-help)"
     ]
   }
 }

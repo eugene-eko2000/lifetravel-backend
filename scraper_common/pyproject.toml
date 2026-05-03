@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scraper-common"
+version = "0.1.0"
+description = "Shared browser-use agent infrastructure for scrapers"
+requires-python = ">=3.11"
+dependencies = [
+  "browser-use==0.12.6",
+  "playwright-stealth==2.0.3",
+  "httpx>=0.27",
+  "openai>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

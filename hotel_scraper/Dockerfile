@@ -1,5 +1,5 @@
 # Build context must be the workspace root (lifetravel-backend/):
-#   docker build -f flight_scraper/Dockerfile .
+#   docker build -f hotel_scraper/Dockerfile .
 FROM python:3.11-slim
 
 # Playwright system dependencies
@@ -17,15 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY scraper_common ./scraper_common/
-COPY flight_scraper/pyproject.toml ./flight_scraper/
-COPY flight_scraper/src ./flight_scraper/src/
+COPY hotel_scraper/pyproject.toml ./hotel_scraper/
+COPY hotel_scraper/src ./hotel_scraper/src/
 
-WORKDIR /workspace/flight_scraper
+WORKDIR /workspace/hotel_scraper
 
 RUN pip install --no-cache-dir . \
     && playwright install chromium \
     && playwright install-deps chromium
 
-EXPOSE 8081
+EXPOSE 8082
 
-CMD ["python", "/workspace/flight_scraper/src/main.py"]
+CMD ["python", "/workspace/hotel_scraper/src/main.py"]

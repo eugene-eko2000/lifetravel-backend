@@ -3,9 +3,9 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flight-scraper"
+name = "hotel-scraper"
 version = "0.1.0"
-description = "Flight search scraper using browser_use and Claude"
+description = "Hotel search scraper using browser_use and Claude"
 requires-python = ">=3.11"
 dependencies = [
   "scraper-common",
