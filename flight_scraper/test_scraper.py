@@ -27,7 +27,7 @@ REQUEST = FlightSearchInput(
     adults=1,
     children=0,
     cabin_class="economy",
-    site="https://www.swiss.com",  # uncomment to test a different site
+    site="https://lufthansa.com",  # uncomment to test a different site
 )
 
 

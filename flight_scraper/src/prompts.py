@@ -55,6 +55,12 @@ Travel websites use bot-detection systems. You must behave naturally at all time
 - Wait for the results page to fully load (flight cards with prices must be visible)
 - Do NOT click Search again while results are loading
 
+## Behave Like a Human
+Travel websites use bot-detection systems. You must behave naturally at all times:
+- If you see a 'Verify you are human' checkbox, stop all other actions. Move the
+  mouse slowly to the checkbox, click it once, and wait 10 seconds without moving
+  the mouse to allow the verification to process.
+
 ## Data Extraction
 From each visible flight card, collect:
 - Airline name(s)
@@ -69,12 +75,11 @@ From each visible flight card, collect:
 Collect the first 5–15 results. Scroll down to reveal more if fewer than 5 are visible.
 
 ## STOP IMMEDIATELY and return success=false if ANY of the following occur:
-1. A CAPTCHA, bot-detection, or "verify you are human" screen appears
-2. The search form cannot be found after 3 location attempts
-3. The same URL appears for more than 4 consecutive steps with no progress
-4. The same action (click, type, etc.) is repeated 3 times in a row with no visible change
-5. No flight results appear after the search completes and all loading indicators are gone
-6. You have re-submitted the search form more than twice
+1. The search form cannot be found after 3 location attempts
+2. The same URL appears for more than 4 consecutive steps with no progress
+3. The same action (click, type, etc.) is repeated 3 times in a row with no visible change
+4. No flight results appear after the search completes and all loading indicators are gone
+5. You have re-submitted the search form more than twice
 
 In every failure case set success=false and populate the error field with a clear reason.
 

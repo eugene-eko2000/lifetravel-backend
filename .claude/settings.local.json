@@ -10,7 +10,11 @@
       "Bash(pip3 index *)",
       "Bash(pip3 install *)",
       "Bash(python3 *)",
-      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/flight_scraper/run_local.sh)"
+      "Bash(chmod +x /Users/eko2000/LifeTravel/lifetravel-backend/flight_scraper/run_local.sh)",
+      "Bash(.venv/bin/python -c \"from browser_use import BrowserProfile; import inspect; print\\(inspect.getsource\\(BrowserProfile\\)\\)\")",
+      "Bash(.venv/bin/python *)",
+      "Bash(.venv/bin/pip index *)",
+      "Bash(.venv/bin/pip install *)"
     ]
   }
 }
