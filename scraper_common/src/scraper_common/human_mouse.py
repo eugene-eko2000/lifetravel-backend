@@ -61,11 +61,25 @@ _TIME_PER_PX      = 0.00035 # +0.35 ms per pixel of travel
 _TIME_JITTER      = 0.10    # ±10 % speed variation
 _TIME_MAX_S       = 0.55    # cap so very long moves don't feel laggy
 _MIN_STEP_SLEEP_S = 0.004   # 4 ms floor per waypoint step
+_STEP_JITTER      = 0.15    # ±15 % random fluctuation on each step's sleep time
 _TREMOR_SIGMA     = 1.0     # std-dev of Gaussian jitter on intermediate points (~95% within ±2 px)
 _TREMOR_CLAMP     = 2.0     # hard cap on per-axis jitter magnitude (pixels)
-_BULGE_MIN        = 0.12    # minimum curve bulge (fraction of distance) — never straight
-_BULGE_MAX        = 0.28    # maximum curve bulge
-_BULGE_FLOOR_PX   = 6.0     # absolute minimum bulge in pixels for short hops
+
+# Curve radius is sampled from one of three categories so successive moves
+# visibly differ in arc shape — tight darts, normal arcs, and wide loopy ones.
+# (probability, bulge_min_frac, bulge_max_frac)
+_BULGE_CATEGORIES = (
+    (0.30, 0.06, 0.13),   # tight    — short, near-direct moves
+    (0.45, 0.13, 0.25),   # medium   — typical reach
+    (0.25, 0.25, 0.45),   # wide     — loose, swinging path
+)
+_BULGE_FLOOR_PX   = 6.0   # absolute minimum bulge in pixels for short hops
+
+# Asymmetric easing: peak velocity is shifted earlier in time, giving a
+# longer, gradual deceleration phase before the click — matches measured
+# ballistic-then-corrective human reach profiles.
+_DECEL_SKEW_MIN   = 0.36
+_DECEL_SKEW_MAX   = 0.46  # 0.50 would be symmetric ease-in-out-sine
 
 # ── Pre-click hover tuning ────────────────────────────────────────────────────
 _HOVER_STEPS_MIN  = 2       # fewest micro-hover movements before mousedown
@@ -168,21 +182,88 @@ def _emit_viz(client: Any, session_id: Optional[str], x: float, y: float, kind: 
         pass
 
 
+# ── Element-bounds query (for randomised click position inside element) ──────
+
+# Element-size bounds for treating the bounds query as trustworthy. Anything
+# outside is either too tiny (not a real click target) or too large (probably
+# the body/a container, where spreading the click would miss the actual button).
+_BOUNDS_MIN_PX = 8.0
+_BOUNDS_MAX_PX = 400.0
+
+
+async def _query_element_bounds(
+    client: Any, session_id: Optional[str], x: float, y: float
+) -> Optional[tuple[float, float, float, float]]:
+    """
+    Return (left, top, width, height) of the topmost element at (x,y) in
+    viewport coordinates, or None if it can't be measured. Failures are
+    swallowed silently — the caller should fall back to the centre+jitter path.
+    """
+    expr = (
+        "(function(x,y){"
+        "var e=document.elementFromPoint(x,y);"
+        "if(!e)return null;"
+        "var r=e.getBoundingClientRect();"
+        "return [r.left,r.top,r.width,r.height];"
+        f"}})({x},{y})"
+    )
+    try:
+        res = await client.send_raw(
+            method="Runtime.evaluate",
+            params={
+                "expression": expr,
+                "returnByValue": True,
+                "awaitPromise": False,
+                "silent": True,
+            },
+            session_id=session_id,
+        )
+        val = res.get("result", {}).get("value")
+        if not val or len(val) != 4:
+            return None
+        return tuple(float(v) for v in val)  # type: ignore[return-value]
+    except Exception:
+        return None
+
+
 # ── Math helpers ──────────────────────────────────────────────────────────────
 
-def _ease_inv(p: float) -> float:
+def _ease_inv(p: float, skew: float = 0.5) -> float:
     """
-    Inverse of ease-in-out-sine: maps normalised path position p ∈ [0,1]
-    to normalised elapsed time t ∈ [0,1].
+    Inverse easing — maps normalised spatial position p ∈ [0,1] to normalised
+    elapsed time t ∈ [0,1]. Used to compute per-step time budget for
+    equally-spaced spatial waypoints, producing the slow→fast→slow profile.
 
-    Using equally-spaced *spatial* steps, the time budget per step is
-    Δt = ease_inv((i+1)/n) − ease_inv(i/n), which gives:
-      • large Δt at start and end  → cursor moves slowly (acceleration phase)
-      • small Δt in the middle     → cursor moves quickly (cruise phase)
-    matching real measured human mouse trajectories.
+      skew = 0.5  → symmetric ease-in-out-sine (acceleration mirrors deceleration)
+      skew < 0.5  → peak velocity shifted earlier in time → quicker acceleration,
+                    longer/gentler deceleration toward the click target.
+
+    Real human mouse moves measured in HCI studies show a peak ~30–45 % into
+    the trajectory rather than dead centre, so we draw skew randomly per move.
     """
     p = max(0.0, min(1.0, p))
-    return math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * p))) / math.pi
+    base = math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * p))) / math.pi
+    # Symmetric sine-shaped distortion that preserves the [0,1] endpoints —
+    # nudges the curve below `base` when skew<0.5, so a given spatial midpoint
+    # is reached earlier in time → first half fast, second half slow.
+    bias = (0.5 - skew) * math.sin(math.pi * base) * 0.4
+    return max(0.0, min(1.0, base - bias))
+
+
+def _sample_bulge_fraction() -> tuple[float, float]:
+    """
+    Pick a (min, max) bulge-fraction range from the categorical distribution
+    in _BULGE_CATEGORIES. Returns the bracket the actual sample is drawn from
+    so callers can also report the chosen category.
+    """
+    r = random.random()
+    cum = 0.0
+    for prob, bmin, bmax in _BULGE_CATEGORIES:
+        cum += prob
+        if r <= cum:
+            return bmin, bmax
+    bmin, bmax = _BULGE_CATEGORIES[-1][1], _BULGE_CATEGORIES[-1][2]
+    return bmin, bmax
 
 
 def _bezier_cubic(p0: tuple, p1: tuple, p2: tuple, p3: tuple, t: float) -> tuple:
@@ -204,7 +285,8 @@ def _build_path(sx: float, sy: float, ex: float, ey: float) -> list[tuple[int, i
 
     n = max(10, min(50, int(distance / 12)))
     px, py = (-dy / distance, dx / distance)   # unit perpendicular
-    bulge = max(_BULGE_FLOOR_PX, distance * random.uniform(_BULGE_MIN, _BULGE_MAX))
+    bmin, bmax = _sample_bulge_fraction()
+    bulge = max(_BULGE_FLOOR_PX, distance * random.uniform(bmin, bmax))
 
     # Independent sides per control point — same side gives a single arc,
     # opposite sides produce a gentle S-curve. Both are observed in real humans.
@@ -290,16 +372,22 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             path = _build_path(_mouse_x, _mouse_y, target_x, target_y)
             n = len(path)
 
+            # Per-move asymmetric ease — peak velocity reached at ~36-46%
+            # through the path, leaving a longer deceleration phase.
+            skew = random.uniform(_DECEL_SKEW_MIN, _DECEL_SKEW_MAX)
+
             logger.debug(
-                "Mouse path (%.0f,%.0f)→(%.0f,%.0f) dist=%.0f steps=%d time=%.2fs",
-                _mouse_x, _mouse_y, target_x, target_y, distance, n, total_time,
+                "Mouse path (%.0f,%.0f)→(%.0f,%.0f) dist=%.0f steps=%d time=%.2fs skew=%.2f",
+                _mouse_x, _mouse_y, target_x, target_y, distance, n, total_time, skew,
             )
 
             result: dict = {}
             for i, (wx, wy) in enumerate(path):
-                t0 = _ease_inv(i / n)
-                t1 = _ease_inv((i + 1) / n)
+                t0 = _ease_inv(i / n, skew)
+                t1 = _ease_inv((i + 1) / n, skew)
                 step_time = max(_MIN_STEP_SLEEP_S, (t1 - t0) * total_time)
+                # Add per-step fluctuation so cruise speed isn't perfectly constant.
+                step_time *= random.uniform(1.0 - _STEP_JITTER, 1.0 + _STEP_JITTER)
                 result = await self._client.send_raw(
                     method="Input.dispatchMouseEvent",
                     params={"type": "mouseMoved", "x": wx, "y": wy},
@@ -316,6 +404,12 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             target_x = float(params.get("x", _mouse_x))
             target_y = float(params.get("y", _mouse_y))
 
+            # Look up the element's bounding box *before* the hover sequence
+            # so we already know the safe region during the click sequence.
+            bounds = await _query_element_bounds(
+                self._client, session_id, target_x, target_y
+            )
+
             # Hand settling: 2–4 tiny random moves converging on the target
             for _ in range(random.randint(_HOVER_STEPS_MIN, _HOVER_STEPS_MAX)):
                 hx = target_x + random.gauss(0.0, _HOVER_SIGMA)
@@ -331,14 +425,42 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             # Dwell pause — reaction time before committing the click
             await asyncio.sleep(random.uniform(_DWELL_MIN_S, _DWELL_MAX_S))
 
-            # Real humans don't hit the exact pixel centre of an element
-            click_x = round(target_x + random.gauss(0.0, _CLICK_OFFSET_SIGMA))
-            click_y = round(target_y + random.gauss(0.0, _CLICK_OFFSET_SIGMA))
+            # Pick the actual click coordinates. When we have a trustworthy
+            # bounding box we spread the click anywhere inside the element
+            # (Gaussian centred on the requested target, clipped to an inset
+            # of the box). Otherwise fall back to a small Gaussian offset.
+            click_x = click_y = 0
+            click_strategy = "center"
+            if (
+                bounds is not None
+                and _BOUNDS_MIN_PX <= bounds[2] <= _BOUNDS_MAX_PX
+                and _BOUNDS_MIN_PX <= bounds[3] <= _BOUNDS_MAX_PX
+            ):
+                bx, by, bw, bh = bounds
+                inset_x = max(1.0, min(bw * 0.15, 6.0))
+                inset_y = max(1.0, min(bh * 0.15, 6.0))
+                # σ proportional to element size, capped so we don't fly far
+                # from the intended target on long buttons / cards.
+                sigma_x = max(1.0, min(bw / 4.0, 10.0))
+                sigma_y = max(1.0, min(bh / 4.0, 10.0))
+                cx = target_x + random.gauss(0.0, sigma_x)
+                cy = target_y + random.gauss(0.0, sigma_y)
+                cx = max(bx + inset_x, min(bx + bw - inset_x, cx))
+                cy = max(by + inset_y, min(by + bh - inset_y, cy))
+                click_x = round(cx)
+                click_y = round(cy)
+                click_strategy = f"box({bw:.0f}x{bh:.0f})"
+            else:
+                click_x = round(target_x + random.gauss(0.0, _CLICK_OFFSET_SIGMA))
+                click_y = round(target_y + random.gauss(0.0, _CLICK_OFFSET_SIGMA))
+
             _mouse_x, _mouse_y = float(click_x), float(click_y)
 
             logger.debug(
-                "Click press (%d,%d) offset from centre (%.0f,%.0f)",
-                click_x, click_y, target_x, target_y,
+                "Click press (%d,%d) Δ=(%+.1f,%+.1f) from target (%.0f,%.0f) [%s]",
+                click_x, click_y,
+                click_x - target_x, click_y - target_y,
+                target_x, target_y, click_strategy,
             )
             _emit_viz(self._client, session_id, click_x, click_y, "press")
             return await _orig(self, {**params, "x": click_x, "y": click_y}, session_id=session_id)
