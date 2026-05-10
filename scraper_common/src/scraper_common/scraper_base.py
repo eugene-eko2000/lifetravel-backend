@@ -75,15 +75,38 @@ async def run_browser_agent(
         temperature=0,
     )
 
-    browser = Browser(
-        headless=cfg.headless,
-        channel=cfg.browser_channel,
-        args=["--disable-blink-features=AutomationControlled"],
-        ignore_default_args=["--enable-automation"],
-        user_agent=_USER_AGENT,
-        wait_between_actions=cfg.wait_between_actions,
-        minimum_wait_page_load_time=cfg.min_page_load_wait,
-    )
+    # Attach to an externally-managed browser when BROWSER_CDP_URL is set;
+    # otherwise launch a fresh instance ourselves. Launch-only kwargs
+    # (channel, args, headless, user_agent) are skipped on the attach path
+    # since the running browser already has them.
+    if cfg.browser_cdp_url:
+        logger.info("Attaching to running browser at %s", cfg.browser_cdp_url)
+        browser = Browser(
+            cdp_url=cfg.browser_cdp_url,
+            keep_alive=True,
+            wait_between_actions=cfg.wait_between_actions,
+            minimum_wait_page_load_time=cfg.min_page_load_wait,
+        )
+    else:
+        if cfg.user_data_dir:
+            logger.info("Launching browser with user-data dir %s", cfg.user_data_dir)
+        browser = Browser(
+            headless=cfg.headless,
+            channel=cfg.browser_channel,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                # Cookies enabled — disable Chrome 136+ Tracking Protection
+                # (which blocks third-party cookies by default) and storage
+                # partitioning, so auth flows, embedded widgets and any
+                # cross-origin cookie handshake work as they did pre-2025.
+                "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
+            ],
+            ignore_default_args=["--enable-automation"],
+            user_agent=_USER_AGENT,
+            # user_data_dir=cfg.user_data_dir or None,
+            wait_between_actions=cfg.wait_between_actions,
+            minimum_wait_page_load_time=cfg.min_page_load_wait,
+        )
 
     # Per-run tracking state for cycle detection
     url_visit_counts: Counter[str] = Counter()
@@ -189,4 +212,7 @@ async def run_browser_agent(
         logger.exception("Browser agent raised an exception")
         return None, str(exc)
     finally:
-        await browser.stop()
+        # Only stop browsers we launched ourselves — leave externally-attached
+        # ones running for the next call / for the operator to inspect.
+        if not cfg.browser_cdp_url:
+            await browser.stop()

@@ -60,6 +60,9 @@ Travel websites use bot-detection systems. You must behave naturally at all time
 - If you see a 'Verify you are human' checkbox, stop all other actions. Move the
   mouse slowly to the checkbox, click it once, and wait 10 seconds without moving
   the mouse to allow the verification to process.
+- If you are seeing a Press & Hold button, then click and hold the button until the
+  button text "Press & Hold" is changed to something like Ok Or Verified, then release
+  the click and wait for 10 seconds for the verification to process.
 
 ## Data Extraction
 From each visible flight card, collect:

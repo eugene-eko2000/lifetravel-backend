@@ -24,10 +24,14 @@ Interaction model
   Bézier path    – cubic curve, random perp-offset control points → natural arc
   Ease-in-out    – inverse ease-in-out-sine timing per waypoint → slow→fast→slow
   Hand tremor    – Gaussian micro-jitter on intermediate waypoints
-  Pre-click hover– 2–4 tiny random moves simulating the hand settling on target
-  Dwell pause    – 80–180 ms between hover and mousedown (reaction time model)
+  Pre-click hover– 2–4 tiny random moves simulating the hand settling on target;
+                   skipped entirely when the cursor is already inside the target
+                   element's bounding box (post-modal-close, accordion expand, …)
+  Dwell pause    – 200–500 ms between cursor stop and mousedown (reaction time)
   Click offset   – Gaussian offset from exact element centre (humans miss centre)
-  Click hold     – 50–150 ms between mousedown and mouseup (button hold time)
+  Click hold     – 50–150 ms between mousedown and mouseup (button hold time);
+                   overridable per-task via the ``click_hold(duration)``
+                   context manager for click-and-hold / long-press scenarios
   Lift-off drift – small movement after mouseReleased (natural finger rebound)
   Global tracking– every path starts from the last known cursor position
 
@@ -47,7 +51,9 @@ import math
 import os
 import random
 import logging
-from typing import Any, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator, Optional
 
 logger = logging.getLogger("scraper_common.human_mouse")
 
@@ -87,15 +93,57 @@ _HOVER_STEPS_MAX  = 4       # most  micro-hover movements before mousedown
 _HOVER_SIGMA      = 1.5     # std-dev of each hover micro-offset (pixels)
 _HOVER_STEP_MIN_S = 0.012   # min delay between hover micro-steps
 _HOVER_STEP_MAX_S = 0.030   # max delay between hover micro-steps
-_DWELL_MIN_S      = 0.08    # min pause between last hover move and mousedown
-_DWELL_MAX_S      = 0.18    # max pause between last hover move and mousedown
+_DWELL_MIN_S      = 0.20    # min pause between cursor stop and mousedown
+_DWELL_MAX_S      = 0.50    # max pause between cursor stop and mousedown
 
 # ── Click position offset ─────────────────────────────────────────────────────
 _CLICK_OFFSET_SIGMA = 1.8   # std-dev of click position from exact centre (px)
 
 # ── Button hold (mousedown → mouseup) ─────────────────────────────────────────
-_CLICK_HOLD_MIN_S = 0.050   # min time the button stays pressed
-_CLICK_HOLD_MAX_S = 0.150   # max time the button stays pressed
+_CLICK_HOLD_MIN_S = 0.050   # min time the button stays pressed (default range)
+_CLICK_HOLD_MAX_S = 0.150   # max time the button stays pressed (default range)
+
+# Per-task override for the click-hold duration. When set, the next
+# mouseReleased event will hold the button down for exactly this many seconds
+# instead of drawing from the default 50–150 ms range. Backed by a ContextVar
+# so concurrent agents in different asyncio tasks don't trample each other.
+_click_hold_override: ContextVar[Optional[float]] = ContextVar(
+    "_human_mouse_click_hold_override", default=None
+)
+
+
+@contextmanager
+def click_hold(duration: float) -> Iterator[None]:
+    """
+    Force every click dispatched inside this block to hold the mouse button
+    down for exactly ``duration`` seconds before releasing.
+
+    Use for long-press tests, anti-bot duration checks, or as the hold phase
+    of a drag gesture. Per-asyncio-task scoped, so parallel agents are safe.
+
+        with click_hold(2.5):
+            await page.click("#submit")     # this click holds 2.5 s
+        await page.click("#cancel")         # back to default 50–150 ms
+    """
+    if duration < 0:
+        raise ValueError(f"click_hold duration must be ≥ 0, got {duration}")
+    token = _click_hold_override.set(duration)
+    try:
+        yield
+    finally:
+        _click_hold_override.reset(token)
+
+
+def set_click_hold_override(duration: Optional[float]) -> None:
+    """
+    Imperative variant of :func:`click_hold` for callers that can't wrap the
+    click in a ``with`` block (e.g. event-driven flows). Pass a float to set,
+    or ``None`` to clear. Sticks until cleared — affects every subsequent
+    click in the current asyncio task.
+    """
+    if duration is not None and duration < 0:
+        raise ValueError(f"click_hold duration must be ≥ 0, got {duration}")
+    _click_hold_override.set(duration)
 
 # ── Post-release lift-off tuning ──────────────────────────────────────────────
 _LIFT_DELAY_MIN_S = 0.018   # pause before the post-release drift move
@@ -189,6 +237,20 @@ def _emit_viz(client: Any, session_id: Optional[str], x: float, y: float, kind: 
 # the body/a container, where spreading the click would miss the actual button).
 _BOUNDS_MIN_PX = 8.0
 _BOUNDS_MAX_PX = 400.0
+
+
+def _point_inside_box(
+    x: float,
+    y: float,
+    bounds: tuple[float, float, float, float],
+    edge_margin: float = 2.0,
+) -> bool:
+    """True when (x,y) sits at least edge_margin pixels in from each side of bounds."""
+    bx, by, bw, bh = bounds
+    return (
+        (bx + edge_margin) <= x <= (bx + bw - edge_margin)
+        and (by + edge_margin) <= y <= (by + bh - edge_margin)
+    )
 
 
 async def _query_element_bounds(
@@ -364,6 +426,37 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 _emit_viz(self._client, session_id, target_x, target_y, "move")
                 return await _orig(self, params, session_id=session_id)
 
+            # Cursor already on (inside) the target element? Don't move it.
+            # This happens after a screen change (modal close, lazy-loaded card,
+            # accordion expand) where the new clickable lands under the cursor's
+            # current position. A real human wouldn't move the mouse in that case.
+            if distance < 200.0:
+                bounds = await _query_element_bounds(
+                    self._client, session_id, target_x, target_y
+                )
+                if (
+                    bounds is not None
+                    and _BOUNDS_MIN_PX <= bounds[2] <= _BOUNDS_MAX_PX
+                    and _BOUNDS_MIN_PX <= bounds[3] <= _BOUNDS_MAX_PX
+                    and _point_inside_box(_mouse_x, _mouse_y, bounds)
+                ):
+                    logger.debug(
+                        "mouseMoved suppressed — cursor (%.0f,%.0f) already inside "
+                        "target element (%.0f,%.0f %.0fx%.0f)",
+                        _mouse_x, _mouse_y, bounds[0], bounds[1], bounds[2], bounds[3],
+                    )
+                    # No-op dispatch so the CDP layer still sees an event;
+                    # the cursor literally doesn't travel anywhere.
+                    return await self._client.send_raw(
+                        method="Input.dispatchMouseEvent",
+                        params={
+                            "type": "mouseMoved",
+                            "x": round(_mouse_x),
+                            "y": round(_mouse_y),
+                        },
+                        session_id=session_id,
+                    )
+
             total_time = _TIME_BASE_S + distance * _TIME_PER_PX
             total_time = min(
                 _TIME_MAX_S,
@@ -409,6 +502,28 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             bounds = await _query_element_bounds(
                 self._client, session_id, target_x, target_y
             )
+
+            # Cursor already on the target → no hover, no offset; just dwell
+            # and click at the cursor's actual position.
+            if (
+                bounds is not None
+                and _BOUNDS_MIN_PX <= bounds[2] <= _BOUNDS_MAX_PX
+                and _BOUNDS_MIN_PX <= bounds[3] <= _BOUNDS_MAX_PX
+                and _point_inside_box(_mouse_x, _mouse_y, bounds)
+            ):
+                await asyncio.sleep(random.uniform(_DWELL_MIN_S, _DWELL_MAX_S))
+                click_x = round(_mouse_x)
+                click_y = round(_mouse_y)
+                logger.debug(
+                    "Click press (%d,%d) — cursor already on target, no hover",
+                    click_x, click_y,
+                )
+                _emit_viz(self._client, session_id, click_x, click_y, "press")
+                return await _orig(
+                    self,
+                    {**params, "x": click_x, "y": click_y},
+                    session_id=session_id,
+                )
 
             # Hand settling: 2–4 tiny random moves converging on the target
             for _ in range(random.randint(_HOVER_STEPS_MIN, _HOVER_STEPS_MAX)):
@@ -467,9 +582,15 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
 
         # ── mouseReleased → hold delay + release at press position + lift-off ─
         if event_type == "mouseReleased":
-            # Hold the button down for 50–150 ms (real human click duration)
-            hold_s = random.uniform(_CLICK_HOLD_MIN_S, _CLICK_HOLD_MAX_S)
-            logger.debug("Click hold %.0f ms before mouseup", hold_s * 1000)
+            # Hold for either the caller-supplied override (click-and-hold) or
+            # the default random 50–150 ms range (real human click duration).
+            override = _click_hold_override.get()
+            if override is not None:
+                hold_s = float(override)
+                logger.debug("Click hold %.0f ms (override) before mouseup", hold_s * 1000)
+            else:
+                hold_s = random.uniform(_CLICK_HOLD_MIN_S, _CLICK_HOLD_MAX_S)
+                logger.debug("Click hold %.0f ms before mouseup", hold_s * 1000)
             await asyncio.sleep(hold_s)
 
             # Match the (possibly offset) coordinates used at press time
