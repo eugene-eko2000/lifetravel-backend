@@ -25,10 +25,16 @@ REQUEST = FlightSearchInput(
     destination="New York",
     departure_date="2026-06-15",
     return_date="2026-06-22",
+    # days_range=2,
     adults=1,
     children=0,
-    cabin_class="economy",
-    site="https://skyscanner.com",  # uncomment to test a different site
+    cabin_class="economy",    
+    # site="https://easyjet.com",
+    # site="https://ryanair.com",
+    # site="https://airfrance.com",
+    # site="https://lufthansa.com",
+    # site="https://skyscanner.com",
+    site="https://flights.google.com",
 )
 
 

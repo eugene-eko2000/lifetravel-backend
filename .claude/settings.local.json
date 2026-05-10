@@ -15,7 +15,19 @@
       "Bash(.venv/bin/python *)",
       "Bash(.venv/bin/pip index *)",
       "Bash(.venv/bin/pip install *)",
-      "Skill(keybindings-help)"
+      "Skill(keybindings-help)",
+      "Bash(git -C /Users/eko2000/LifeTravel/lifetravel-backend status)",
+      "Bash(git -C /Users/eko2000/LifeTravel/lifetravel-backend diff)",
+      "Bash(git -C /Users/eko2000/LifeTravel/lifetravel-backend log --oneline -5)",
+      "Bash(git -C /Users/eko2000/LifeTravel/lifetravel-backend add flight_scraper/.env.example flight_scraper/src/prompts.py scraper_common/src/scraper_common/cfg.py scraper_common/src/scraper_common/human_mouse.py scraper_common/src/scraper_common/scraper_base.py)",
+      "Bash(git -C /Users/eko2000/LifeTravel/lifetravel-backend commit -m ' *)",
+      "Bash(/Users/eko2000/LifeTravel/lifetravel-backend/flight_scraper/.venv/bin/pip install *)",
+      "Bash(/Users/eko2000/LifeTravel/lifetravel-backend/flight_scraper/.venv/bin/python -c \"import camoufox; print\\(camoufox.__version__\\); print\\([x for x in dir\\(camoufox\\) if not x.startswith\\('_'\\)]\\)\")",
+      "Bash(uv --version)",
+      "Bash(uv add *)",
+      "Bash(PYTHON=/Users/eko2000/LifeTravel/lifetravel-backend/scraper_common/.venv/bin/python && ls $PYTHON 2>&1 || find /Users/eko2000/LifeTravel/lifetravel-backend/scraper_common -name \"python*\" -type f 2>/dev/null | head -5)",
+      "Read(//opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/bin/**)",
+      "Bash(/Users/eko2000/LifeTravel/lifetravel-backend/scraper_common/.venv/bin/python -)"
     ]
   }
 }

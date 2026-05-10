@@ -10,6 +10,15 @@ class FlightSearchInput(BaseModel):
         default=None,
         description="Return date in YYYY-MM-DD format. Omit or null for one-way trip.",
     )
+    days_range: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Date flexibility in days. When > 0, search departure (and return) dates "
+            "in the range [date - days_range, date + days_range], keeping trip duration "
+            "constant for round trips. 0 means search the exact dates only."
+        ),
+    )
     adults: int = Field(default=1, ge=1, le=9, description="Number of adult passengers")
     children: int = Field(default=0, ge=0, le=8, description="Number of child passengers (ages 2-11)")
     cabin_class: str = Field(
@@ -41,6 +50,14 @@ class FlightSegment(BaseModel):
 
 
 class FlightOffer(BaseModel):
+    departure_date: Optional[str] = Field(
+        default=None,
+        description="Actual departure date for this offer in YYYY-MM-DD format.",
+    )
+    return_date: Optional[str] = Field(
+        default=None,
+        description="Actual return date for this offer in YYYY-MM-DD format (round trips only).",
+    )
     price: float = Field(description="Total price for all passengers combined")
     currency: str = Field(default="USD", description="ISO currency code, e.g. 'USD' or 'EUR'")
     outbound: FlightSegment = Field(description="Outbound (departure) flight details")

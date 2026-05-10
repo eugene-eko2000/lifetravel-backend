@@ -5,12 +5,13 @@ Call run_browser_agent() with domain-specific prompts and output schema.
 Returns (raw_output, stop_reason) where stop_reason is set when a cycle was
 detected or an exception occurred.
 """
+import contextlib
 import logging
 from collections import Counter
 from typing import Any
 
 from browser_use import Agent, Browser
-from browser_use.llm import ChatAnthropic
+from browser_use.llm import BaseChatModel
 from playwright_stealth import Stealth
 
 from scraper_common.cfg import Cfg
@@ -38,6 +39,28 @@ _STEALTH = Stealth(
     # Expose window.chrome so sites that probe it see a "real" Chrome object.
     chrome_runtime=True,
 )
+
+
+def _build_llm(cfg: "Cfg") -> BaseChatModel:
+    provider = cfg.llm_provider
+    if provider == "openai":
+        from browser_use.llm import ChatOpenAI
+        if not cfg.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        return ChatOpenAI(model=cfg.openai_model, api_key=cfg.openai_api_key, temperature=0)
+    if provider == "google":
+        from browser_use.llm import ChatGoogle
+        if not cfg.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=google")
+        return ChatGoogle(model=cfg.gemini_model, api_key=cfg.gemini_api_key, temperature=0)
+    if provider != "anthropic":
+        logging.getLogger(__name__).warning(
+            "Unknown LLM_PROVIDER %r — falling back to anthropic", provider
+        )
+    from browser_use.llm import ChatAnthropic
+    if not cfg.anthropic_api_key:
+        raise ValueError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+    return ChatAnthropic(model=cfg.anthropic_model, api_key=cfg.anthropic_api_key, temperature=0)
 
 
 def _detect_action_cycle(sequence: list[str], window: int, threshold: int) -> bool:
@@ -69,44 +92,7 @@ async def run_browser_agent(
     logger = logging.getLogger(logger_name)
     captcha_solver = CaptchaSolver.from_cfg(cfg)
 
-    llm = ChatAnthropic(
-        model=cfg.anthropic_model,
-        api_key=cfg.anthropic_api_key,
-        temperature=0,
-    )
-
-    # Attach to an externally-managed browser when BROWSER_CDP_URL is set;
-    # otherwise launch a fresh instance ourselves. Launch-only kwargs
-    # (channel, args, headless, user_agent) are skipped on the attach path
-    # since the running browser already has them.
-    if cfg.browser_cdp_url:
-        logger.info("Attaching to running browser at %s", cfg.browser_cdp_url)
-        browser = Browser(
-            cdp_url=cfg.browser_cdp_url,
-            keep_alive=True,
-            wait_between_actions=cfg.wait_between_actions,
-            minimum_wait_page_load_time=cfg.min_page_load_wait,
-        )
-    else:
-        if cfg.user_data_dir:
-            logger.info("Launching browser with user-data dir %s", cfg.user_data_dir)
-        browser = Browser(
-            headless=cfg.headless,
-            channel=cfg.browser_channel,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                # Cookies enabled — disable Chrome 136+ Tracking Protection
-                # (which blocks third-party cookies by default) and storage
-                # partitioning, so auth flows, embedded widgets and any
-                # cross-origin cookie handshake work as they did pre-2025.
-                "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
-            ],
-            ignore_default_args=["--enable-automation"],
-            user_agent=_USER_AGENT,
-            # user_data_dir=cfg.user_data_dir or None,
-            wait_between_actions=cfg.wait_between_actions,
-            minimum_wait_page_load_time=cfg.min_page_load_wait,
-        )
+    llm = _build_llm(cfg)
 
     # Per-run tracking state for cycle detection
     url_visit_counts: Counter[str] = Counter()
@@ -183,36 +169,143 @@ async def run_browser_agent(
             [type(a).__name__ for a in (getattr(agent_output, "action", None) or [])],
         )
 
-    try:
-        agent = Agent(
-            task=task_prompt,
-            llm=llm,
-            browser=browser,
-            extend_system_message=system_prompt_extension,
-            output_model_schema=output_model_schema,
-            loop_detection_enabled=True,
-            loop_detection_window=10,
-            max_failures=3,
-            register_should_stop_callback=should_stop,
-            register_new_step_callback=on_new_step,
-        )
+    async with contextlib.AsyncExitStack() as stack:
+        # ── Browser setup ─────────────────────────────────────────────────────
+        # Three paths:
+        #   1. camoufox  — Firefox-based stealth; launched via AsyncCamoufox,
+        #                  connected to browser_use via its WS endpoint.
+        #   2. CDP attach — connect to an already-running browser (any engine).
+        #   3. Chrome     — launch a fresh Chromium/Chrome instance ourselves.
+        if cfg.browser_type == "camoufox":
+            import asyncio
+            import base64
+            import re
+            from functools import partial
+            from pathlib import Path
+            import orjson
+            from camoufox.utils import launch_options as camoufox_launch_options
+            from camoufox.server import get_nodejs, to_camel_case_dict
+            from camoufox.pkgman import LOCAL_DATA
 
-        async def on_step_start(agent: Agent) -> None:
-            await apply_stealth(agent)
-            await captcha_solver.handle(agent)
+            logger.info("Launching Camoufox server (headless=%s)", cfg.headless)
 
-        history = await agent.run(
-            max_steps=cfg.max_steps,
-            on_step_start=on_step_start,
-        )
-        raw = history.final_result()
-        return raw, (stop_reason[0] if stop_reason else None)
+            # Build fingerprinted Firefox launch options (synchronous)
+            opts = await asyncio.get_event_loop().run_in_executor(
+                None, partial(camoufox_launch_options, headless=cfg.headless)
+            )
 
-    except Exception as exc:
-        logger.exception("Browser agent raised an exception")
-        return None, str(exc)
-    finally:
-        # Only stop browsers we launched ourselves — leave externally-attached
-        # ones running for the next call / for the operator to inspect.
-        if not cfg.browser_cdp_url:
-            await browser.stop()
+            # camoufox's launchServer.js wraps Playwright's internal Firefox
+            # launchServer() and prints the WebSocket endpoint to stdout.
+            nodejs = get_nodejs()
+            launch_script = str(LOCAL_DATA / "launchServer.js")
+            # Strip None values — Playwright's launchServer rejects null for
+            # optional fields like proxy that expect an object or no key at all.
+            clean_opts = {k: v for k, v in opts.items() if v is not None}
+            encoded_opts = base64.b64encode(
+                orjson.dumps(to_camel_case_dict(clean_opts))
+            ).decode()
+
+            proc = await asyncio.create_subprocess_exec(
+                nodejs,
+                launch_script,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                cwd=str(Path(nodejs).parent / "package"),
+            )
+            stack.callback(proc.terminate)
+
+            proc.stdin.write(encoded_opts.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+
+            # Read stdout until we find the WebSocket endpoint line.
+            ws_url: str | None = None
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=30.0)
+                if not line:
+                    break
+                # Strip ANSI colour codes; line format:
+                #   "Websocket endpoint:\x1b[93m ws://127.0.0.1:PORT/path \x1b[0m"
+                text = re.sub(r"\x1b\[[0-9;]*m", "", line.decode()).strip()
+                if "Websocket endpoint:" in text:
+                    ws_url = text.split("Websocket endpoint:", 1)[-1].strip()
+                    break
+
+            if not ws_url:
+                raise RuntimeError("Camoufox server did not report a WebSocket endpoint")
+
+            logger.info("Camoufox ready at %s", ws_url)
+
+            # Pass the ws:// URL directly — browser_use skips /json/version
+            # when the cdp_url already starts with "ws".
+            browser = Browser(
+                cdp_url=ws_url,
+                keep_alive=True,
+                wait_between_actions=cfg.wait_between_actions,
+                minimum_wait_page_load_time=cfg.min_page_load_wait,
+            )
+            owned_browser = False  # camoufox process lifecycle managed by the stack
+        elif cfg.browser_cdp_url:
+            logger.info("Attaching to running browser at %s", cfg.browser_cdp_url)
+            browser = Browser(
+                cdp_url=cfg.browser_cdp_url,
+                keep_alive=True,
+                wait_between_actions=cfg.wait_between_actions,
+                minimum_wait_page_load_time=cfg.min_page_load_wait,
+            )
+            owned_browser = False
+        else:
+            if cfg.user_data_dir:
+                logger.info("Launching browser with user-data dir %s", cfg.user_data_dir)
+            browser = Browser(
+                headless=cfg.headless,
+                channel=cfg.browser_channel,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    # Cookies enabled — disable Chrome 136+ Tracking Protection
+                    # (which blocks third-party cookies by default) and storage
+                    # partitioning, so auth flows, embedded widgets and any
+                    # cross-origin cookie handshake work as they did pre-2025.
+                    "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
+                ],
+                ignore_default_args=["--enable-automation"],
+                user_agent=_USER_AGENT,
+                # user_data_dir=cfg.user_data_dir or None,
+                wait_between_actions=cfg.wait_between_actions,
+                minimum_wait_page_load_time=cfg.min_page_load_wait,
+            )
+            owned_browser = True
+
+        try:
+            agent = Agent(
+                task=task_prompt,
+                llm=llm,
+                browser=browser,
+                extend_system_message=system_prompt_extension,
+                output_model_schema=output_model_schema,
+                loop_detection_enabled=True,
+                loop_detection_window=10,
+                max_failures=3,
+                register_should_stop_callback=should_stop,
+                register_new_step_callback=on_new_step,
+            )
+
+            async def on_step_start(agent: Agent) -> None:
+                await apply_stealth(agent)
+                await captcha_solver.handle(agent)
+
+            history = await agent.run(
+                max_steps=cfg.max_steps,
+                on_step_start=on_step_start,
+            )
+            raw = history.final_result()
+            return raw, (stop_reason[0] if stop_reason else None)
+
+        except Exception as exc:
+            logger.exception("Browser agent raised an exception")
+            return None, str(exc)
+        finally:
+            # Only stop browsers we launched ourselves — leave externally-attached
+            # ones running for the next call / for the operator to inspect.
+            if owned_browser:
+                await browser.stop()
