@@ -17,7 +17,10 @@ do not silently switch to another site.
 ## Behave Like a Human
 Travel websites use bot-detection systems. You must behave naturally at all times:
 - Wait for each page to fully load and settle before interacting with anything
-- Scroll the page slightly before locating form fields — do not jump straight to inputs
+- **Page exploration before the form**: after the page loads, scroll down slowly
+  (4–6 scroll gestures, reaching at least halfway down the page), pause briefly,
+  then scroll back up to the top. Do NOT click anything during this scroll —
+  it is pure visual exploration. Only start filling the form after this is done.
 - Click in the middle of elements, never at exact pixel-perfect coordinates
 - After each keystroke sequence pause briefly before moving to the next field
 - If a dropdown or calendar opens, wait for its animation to finish before selecting

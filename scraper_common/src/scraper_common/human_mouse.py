@@ -288,6 +288,29 @@ async def _query_element_bounds(
         return None
 
 
+# ── CDP param helpers ─────────────────────────────────────────────────────────
+
+def _move_params(x: int, y: int, buttons: int = 0) -> dict:
+    """
+    Complete CDP params for a mouseMoved event.
+
+    Including pointerType, button, buttons, and modifiers ensures Chrome's
+    PointerEventManager generates the full pointer event sequence alongside the
+    mouse event: pointermove (+ pointerover/pointerenter at element boundaries).
+    Omitting any of these causes Chrome to skip or misclassify the conversion.
+    """
+    return {
+        "type": "mouseMoved",
+        "x": x,
+        "y": y,
+        "button": "none",
+        "buttons": buttons,
+        "modifiers": 0,
+        "pointerType": "mouse",
+    }
+
+
+
 # ── Math helpers ──────────────────────────────────────────────────────────────
 
 def _ease_inv(p: float, skew: float = 0.5) -> float:
@@ -449,11 +472,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                     # the cursor literally doesn't travel anywhere.
                     return await self._client.send_raw(
                         method="Input.dispatchMouseEvent",
-                        params={
-                            "type": "mouseMoved",
-                            "x": round(_mouse_x),
-                            "y": round(_mouse_y),
-                        },
+                        params=_move_params(round(_mouse_x), round(_mouse_y)),
                         session_id=session_id,
                     )
 
@@ -483,7 +502,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 step_time *= random.uniform(1.0 - _STEP_JITTER, 1.0 + _STEP_JITTER)
                 result = await self._client.send_raw(
                     method="Input.dispatchMouseEvent",
-                    params={"type": "mouseMoved", "x": wx, "y": wy},
+                    params=_move_params(wx, wy),
                     session_id=session_id,
                 )
                 _emit_viz(self._client, session_id, wx, wy, "move")
@@ -521,7 +540,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 _emit_viz(self._client, session_id, click_x, click_y, "press")
                 return await _orig(
                     self,
-                    {**params, "x": click_x, "y": click_y},
+                    {**params, "x": click_x, "y": click_y, "pointerType": "mouse"},
                     session_id=session_id,
                 )
 
@@ -531,7 +550,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 hy = target_y + random.gauss(0.0, _HOVER_SIGMA)
                 await self._client.send_raw(
                     method="Input.dispatchMouseEvent",
-                    params={"type": "mouseMoved", "x": round(hx), "y": round(hy)},
+                    params=_move_params(round(hx), round(hy)),
                     session_id=session_id,
                 )
                 _emit_viz(self._client, session_id, hx, hy, "move")
@@ -578,7 +597,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 target_x, target_y, click_strategy,
             )
             _emit_viz(self._client, session_id, click_x, click_y, "press")
-            return await _orig(self, {**params, "x": click_x, "y": click_y}, session_id=session_id)
+            return await _orig(self, {**params, "x": click_x, "y": click_y, "pointerType": "mouse"}, session_id=session_id)
 
         # ── mouseReleased → hold delay + release at press position + lift-off ─
         if event_type == "mouseReleased":
@@ -596,7 +615,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             # Match the (possibly offset) coordinates used at press time
             result = await _orig(
                 self,
-                {**params, "x": round(_mouse_x), "y": round(_mouse_y)},
+                {**params, "x": round(_mouse_x), "y": round(_mouse_y), "pointerType": "mouse"},
                 session_id=session_id,
             )
             _emit_viz(self._client, session_id, _mouse_x, _mouse_y, "release")
@@ -607,7 +626,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             drift_y = round(_mouse_y + random.gauss(0.0, _LIFT_SIGMA))
             await self._client.send_raw(
                 method="Input.dispatchMouseEvent",
-                params={"type": "mouseMoved", "x": drift_x, "y": drift_y},
+                params=_move_params(drift_x, drift_y),
                 session_id=session_id,
             )
             _emit_viz(self._client, session_id, drift_x, drift_y, "move")

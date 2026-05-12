@@ -118,7 +118,7 @@ async def run_browser_agent(
                     session_id=session_id,
                 )
                 stealth_applied_pages.add(pid)
-                logger.debug("Stealth patches applied to page id=%d via CDP", pid)
+                logger.info("Stealth patches applied to page id=%d via CDP", pid)
         except Exception:
             logger.warning("Could not apply stealth patches", exc_info=True)
 
