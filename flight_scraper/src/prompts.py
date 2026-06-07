@@ -17,8 +17,8 @@ do not silently switch to another site.
 ## Behave Like a Human
 Travel websites use bot-detection systems. You must behave naturally at all times:
 - Wait for each page to fully load and settle before interacting with anything
-- **Page exploration before the form**: after the page loads, scroll down up to the page
-  bottom and then scroll up using the mouse wheel event
+- **Page exploration before the form**: after the page loads, scroll one page down
+  and then scroll one page up
 - Click in the middle of elements, never at exact pixel-perfect coordinates
 - After each keystroke sequence pause briefly before moving to the next field
 - If a dropdown or calendar opens, wait for its animation to finish before selecting
@@ -73,6 +73,8 @@ When the task lists multiple date combinations to search:
 ### Step 5 – Set passengers and cabin class
 - If adults > 1 or children > 0, click the passenger selector and adjust counts
 - If cabin class is not "economy", change it to the correct value
+- If there is a form for setting the data mentioned above, but there is no Submit button,
+  scroll the page to find the Search button and press it
 
 ### Step 6 – Submit
 - Click the Search / Explore button ONCE

@@ -154,17 +154,6 @@ _LIFT_DELAY_MIN_S = 0.018   # pause before the post-release drift move
 _LIFT_DELAY_MAX_S = 0.045
 _LIFT_SIGMA       = 1.2     # std-dev of lift-off drift (pixels)
 
-# ── Scroll simulation tuning ──────────────────────────────────────────────────
-_SCROLL_SMALL_THRESHOLD  = 30      # px: |delta| below this is passed through unchanged
-_SCROLL_STEPS_MIN        = 3       # minimum wheel-notch events per scroll
-_SCROLL_STEPS_MAX        = 5       # maximum wheel-notch events per scroll
-_SCROLL_STEP_MIN_PX      = 50.0    # minimum delta per individual notch
-_SCROLL_STEP_MAX_PX      = 100.0   # maximum delta per individual notch
-_SCROLL_INTER_STEP_MIN_S = 0.060   # minimum pause between notches
-_SCROLL_INTER_STEP_MAX_S = 0.180   # maximum pause between notches
-_SCROLL_DWELL_MIN_S      = 0.050   # pre-scroll finger-placement pause (min)
-_SCROLL_DWELL_MAX_S      = 0.150   # pre-scroll finger-placement pause (max)
-
 # ── Visualization state ───────────────────────────────────────────────────────
 _VIZ_ENABLED: bool = False  # set by patch_mouse_movement()
 _VIZ_OK: bool = True        # auto-disabled if Runtime.evaluate fails
@@ -416,31 +405,6 @@ def _build_path(sx: float, sy: float, ex: float, ey: float) -> list[tuple[int, i
     return points
 
 
-def _build_scroll_steps(delta: float) -> list[float]:
-    """
-    Split a single-axis scroll delta into n human-sized sub-steps.
-
-    Returns [] if delta is zero, [delta] unchanged if |delta| < threshold,
-    or a list of n signed step values whose sum equals delta.
-    """
-    if delta == 0.0:
-        return []
-    abs_delta = abs(delta)
-    sign = 1.0 if delta > 0 else -1.0
-    if abs_delta < _SCROLL_SMALL_THRESHOLD:
-        return [delta]
-    n = random.randint(_SCROLL_STEPS_MIN, _SCROLL_STEPS_MAX)
-    raw = [random.uniform(_SCROLL_STEP_MIN_PX, _SCROLL_STEP_MAX_PX) for _ in range(n)]
-    last = abs_delta - sum(raw[:-1])
-    if last < _SCROLL_STEP_MIN_PX or last > _SCROLL_STEP_MAX_PX * 1.5:
-        # Last step would be out of range — scale all steps proportionally instead
-        total = sum(raw)
-        raw = [r * abs_delta / total for r in raw]
-    else:
-        raw[-1] = last
-    return [sign * r for r in raw]
-
-
 # ── Patch entry point ─────────────────────────────────────────────────────────
 
 def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
@@ -477,6 +441,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
         global _mouse_x, _mouse_y
 
         event_type = params.get("type", "")
+        print(f"dispatchMouseEvent: {event_type}")
 
         # ── mouseMoved → Bézier curved path ──────────────────────────────────
         if event_type == "mouseMoved":
@@ -671,52 +636,6 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             _mouse_x, _mouse_y = float(drift_x), float(drift_y)
             return result
 
-        # ── mouseWheel → split into human-sized sub-scrolls ─────────────────
-        if event_type == "mouseWheel":
-            delta_x = float(params.get("deltaX", 0.0))
-            delta_y = float(params.get("deltaY", 0.0))
-            steps_x = _build_scroll_steps(delta_x)
-            steps_y = _build_scroll_steps(delta_y)
-
-            # Both axes small enough — pass through unchanged
-            if len(steps_x) <= 1 and len(steps_y) <= 1:
-                logger.debug(
-                    "mouseWheel pass-through deltaX=%.0f deltaY=%.0f", delta_x, delta_y
-                )
-                return await _orig(self, params, session_id=session_id)
-
-            # Build combined event sequence; shorter axis pads with 0.0.
-            # Diagonal scroll (both non-trivial) splits axes independently and
-            # interleaves the events via zip_longest semantics.
-            n_steps = max(len(steps_x), len(steps_y))
-            combined = [
-                (
-                    steps_x[i] if i < len(steps_x) else 0.0,
-                    steps_y[i] if i < len(steps_y) else 0.0,
-                )
-                for i in range(n_steps)
-            ]
-
-            logger.debug(
-                "mouseWheel deltaX=%.0f deltaY=%.0f → %d sub-step(s)",
-                delta_x, delta_y, n_steps,
-            )
-
-            # Pre-scroll dwell on first step — user positioning fingers on wheel
-            await asyncio.sleep(random.uniform(_SCROLL_DWELL_MIN_S, _SCROLL_DWELL_MAX_S))
-
-            base_params = {k: v for k, v in params.items() if k not in ("deltaX", "deltaY")}
-            result: dict = {}
-            for i, (sx, sy) in enumerate(combined):
-                result = await _orig(
-                    self, {**base_params, "deltaX": sx, "deltaY": sy}, session_id=session_id
-                )
-                if i < n_steps - 1:
-                    await asyncio.sleep(
-                        random.uniform(_SCROLL_INTER_STEP_MIN_S, _SCROLL_INTER_STEP_MAX_S)
-                    )
-            return result
-
         # ── everything else → pass through ───────────────────────────────────
         evt_x = params.get("x")
         evt_y = params.get("y")
@@ -727,17 +646,13 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
 
     InputClient.dispatchMouseEvent = _human_dispatch
     InputClient._human_mouse_patched = True
-    logger.info("\n"
-        "Human mouse-interaction patches applied \n"
-        "(hover %d–%d steps, dwell %.0f–%.0fms, hold %.0f–%.0fms, \n"
-        "click-offset σ=%.0f%%×dim/floor %.0fpx, \n"
-        "scroll %d–%d notches %.0f–%.0fpx @%.0f–%.0fms, viz=%s)",
+    logger.info(
+        "Human mouse-interaction patches applied "
+        "(hover %d–%d steps, dwell %.0f–%.0fms, hold %.0f–%.0fms, "
+        "click-offset σ=%.0f%%×dim/floor %.0fpx, viz=%s)",
         _HOVER_STEPS_MIN, _HOVER_STEPS_MAX,
         _DWELL_MIN_S * 1000, _DWELL_MAX_S * 1000,
         _CLICK_HOLD_MIN_S * 1000, _CLICK_HOLD_MAX_S * 1000,
         _CLICK_SIGMA_FRAC * 100, _CLICK_SIGMA_MIN_PX,
-        _SCROLL_STEPS_MIN, _SCROLL_STEPS_MAX,
-        _SCROLL_STEP_MIN_PX, _SCROLL_STEP_MAX_PX,
-        _SCROLL_INTER_STEP_MIN_S * 1000, _SCROLL_INTER_STEP_MAX_S * 1000,
         "on" if _VIZ_ENABLED else "off",
     )

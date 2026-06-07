@@ -7,7 +7,10 @@ detected or an exception occurred.
 """
 import contextlib
 import logging
+import platform
+import shutil
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 from browser_use import Agent, Browser
@@ -18,10 +21,69 @@ from scraper_common.cfg import Cfg
 from scraper_common.captcha_solver import CaptchaSolver
 from scraper_common.human_typing import patch_watchdog_typing
 from scraper_common.human_mouse import patch_mouse_movement
+from scraper_common.human_scrolling import patch_scroll_page
 
-# Apply human-like keystroke timing and mouse movement before any Agent is instantiated.
+# Apply human-like interaction patches before any Agent is instantiated.
 patch_watchdog_typing()
 patch_mouse_movement()
+patch_scroll_page()
+
+def _system_browser_executable(channel: str | None) -> str | None:
+    """Return the path to the system-installed browser for the given channel, or None."""
+    system = platform.system()
+    key = (channel or "chromium").lower()
+
+    if system == "Darwin":
+        candidates: dict[str, list[str]] = {
+            "chrome": ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+            "chrome-beta": ["/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"],
+            "chrome-dev": ["/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev"],
+            "chrome-canary": ["/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"],
+            "msedge": ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+            "chromium": ["/Applications/Chromium.app/Contents/MacOS/Chromium"],
+        }
+    elif system == "Linux":
+        candidates = {
+            "chrome": ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"],
+            "chrome-beta": ["/usr/bin/google-chrome-beta"],
+            "chrome-dev": ["/usr/bin/google-chrome-dev"],
+            "chrome-canary": [],
+            "msedge": ["/usr/bin/microsoft-edge-stable", "/usr/bin/microsoft-edge"],
+            "chromium": ["/usr/bin/chromium-browser", "/usr/bin/chromium"],
+        }
+    elif system == "Windows":
+        candidates = {
+            "chrome": [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ],
+            "chrome-beta": [r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe"],
+            "chrome-dev": [r"C:\Program Files\Google\Chrome Dev\Application\chrome.exe"],
+            "chrome-canary": [str(Path.home() / r"AppData\Local\Google\Chrome SxS\Application\chrome.exe")],
+            "msedge": [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"],
+            "chromium": [r"C:\Program Files\Chromium\Application\chrome.exe"],
+        }
+    else:
+        return None
+
+    for path in candidates.get(key, []):
+        if Path(path).exists():
+            print(f"Using system browser for channel {channel}: {path}")
+            return path
+
+    # Fall back to PATH lookup
+    which_map: dict[str, list[str]] = {
+        "chrome": ["google-chrome-stable", "google-chrome"],
+        "chromium": ["chromium-browser", "chromium"],
+        "msedge": ["microsoft-edge-stable", "microsoft-edge"],
+    }
+    for name in which_map.get(key, []):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return None
+
 
 # Shared UA used both in the browser profile and in the stealth JS patches so
 # navigator.userAgent, the HTTP header, and the sec-ch-ua hint all agree.
@@ -260,6 +322,7 @@ async def run_browser_agent(
             browser = Browser(
                 headless=cfg.headless,
                 channel=cfg.browser_channel,
+                executable_path=_system_browser_executable(cfg.browser_channel),
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     # Cookies enabled — disable Chrome 136+ Tracking Protection

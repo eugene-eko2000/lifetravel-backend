@@ -1,7 +1,7 @@
 # Human Interaction Simulation — Design Document
 
-**Module**: `scraper_common.human_mouse`, `scraper_common.human_typing`  
-**Entry points**: `patch_mouse_movement()`, `patch_watchdog_typing()`  
+**Module**: `scraper_common.human_mouse`, `scraper_common.human_typing`, `scraper_common.human_scrolling`  
+**Entry points**: `patch_mouse_movement()`, `patch_watchdog_typing()`, `patch_scroll_page()`  
 **Status**: Implemented (this document reverse-engineers the current state)
 
 ---
@@ -23,8 +23,9 @@ The patches operate at the **lowest possible interception level** to maximise co
 | `cdp_use.InputClient.dispatchMouseEvent` | All CDP mouse events | `human_mouse.py` |
 | `browser_use.DefaultActionWatchdog._type_to_page` | Fallback typing path | `human_typing.py` |
 | `browser_use.DefaultActionWatchdog._input_text_element_node_impl` | Primary typing path (via asyncio proxy) | `human_typing.py` |
+| `browser_use.DefaultActionWatchdog.on_ScrollEvent` | LLM-initiated page scroll commands | `human_scrolling.py` |
 
-Both patches are **idempotent** (guarded by `_human_typing_patched` / `_human_mouse_patched` flags) and registered once at startup from `scraper_base.py`.
+All patches are **idempotent** (guarded by `_human_typing_patched` / `_human_mouse_patched` / `_human_scrolling_patched` flags) and registered once at startup from `scraper_base.py`.
 
 ---
 
@@ -247,61 +248,132 @@ A result is considered **trusted** only when `8 ≤ width ≤ 400` and `8 ≤ he
 ### 2.7 Scroll Simulation
 
 #### Trigger
-Any `mouseWheel` CDP event. Currently passes through unmodified (gap §5.5). This section describes the target design.
+
+`DefaultActionWatchdog.on_ScrollEvent` — the method called when the LLM agent issues a scroll command. This is patched by full method replacement, **not** at the CDP `mouseWheel` level.
+
+**Why not `mouseWheel`**: browser-use never emits a `mouseWheel` CDP event when the LLM sends a scroll command. The installed version routes LLM page scrolls through `_scroll_with_cdp_gesture`, which calls `Input.synthesizeScrollGesture` directly at very high speed — bypassing `InputClient.dispatchMouseEvent` entirely. Intercepting `mouseWheel` would therefore never fire for LLM-driven scrolls.
+
+**Element-level scrolls** (`event.node is not None`) are delegated to the original `on_ScrollEvent` handler unchanged, because those need element-specific targeting logic that is not replicated here.
+
+#### Patching strategy
+
+The patch replaces `DefaultActionWatchdog.on_ScrollEvent` (guarded by `_human_scrolling_patched` in `human_scrolling.py`):
+
+```python
+_orig = DefaultActionWatchdog.on_ScrollEvent
+
+async def on_ScrollEvent(self, event) -> None:
+    if event.node is not None:
+        return await _orig(self, event)
+    await _human_scroll_impl(self.browser_session, event.direction, event.amount)
+
+DefaultActionWatchdog.on_ScrollEvent = on_ScrollEvent
+```
+
+The replacement function is named `on_ScrollEvent` (not `_human_on_ScrollEvent`) because browser-use asserts that registered handlers must satisfy `handler.__name__.startswith('on_')`.
+
+`_human_scroll_impl` decomposes the total `amount` into bell-shaped notch steps and drives them via raw CDP `Input.dispatchMouseEvent(mouseWheel)` calls (via `cdp_client.send_raw`) — the only place in this codebase that intentionally emits `mouseWheel` CDP events for scroll. The viewport centre is used as the scroll position; the CDP session is fetched once and reused for all notch events in a single scroll gesture.
 
 #### Motivation
 
-A single large `deltaY` arriving in one CDP event is an immediate bot signal. Real users scroll in a series of discrete wheel notches or trackpad micro-gestures — each moving the page 150–250 px — with brief pauses between them. Detectors fingerprint the number of scroll events, their deltas, and the inter-event cadence.
+A single large `deltaY` arriving in one CDP event is an immediate bot signal. Real users scroll in a series of discrete wheel notches or trackpad micro-gestures with brief pauses between them. Crucially, human scroll velocity is not constant: users accelerate into a scroll gesture and decelerate at the end — the first and last notches are always shorter than the peak-speed notches in the middle. This bell-shaped step-size distribution is a strong behavioural signal that flat or random-uniform decompositions fail to reproduce. Detectors fingerprint not only the total delta and notch count, but also the per-step size distribution.
+
+A second, finer-grained concern motivates the micro-increment layer: each physical mouse-wheel notch is not delivered as one instantaneous CDP event — the OS reports it as a rapid burst of small `mouseWheel` ticks spanning 8–20 ms each as the wheel rotates through its detent. Emitting a single large `deltaY` per notch therefore still looks synthetic at the per-event level. The micro-increment decomposition models this physical wheel-rotation characteristic: each bell-shaped notch is subdivided into 3–7 equal micro-events fired 8–20 ms apart, while the inter-notch pauses (250–600 ms) remain to separate distinct wheel detent engagements.
 
 #### Algorithm
 
-1. **Determine step count**  
-   Choose `n ∈ [3, 5]` uniformly at random. This is the number of sub-scroll events to emit.  
-   Exception: if `|deltaY| < _SCROLL_SMALL_THRESHOLD` (e.g. 100 px), the scroll is already human-sized — emit it as a single event unchanged.
+1. **Pass-through for tiny scrolls**  
+   If `|amount| < _SCROLL_SMALL_THRESHOLD` (30 px), the scroll is already human-sized — emit it as a single `mouseWheel` CDP event and return.
 
-2. **Generate per-step deltas**  
-   Draw `n` independent samples:
-   ```
-   raw_i = U(_SCROLL_STEP_MIN_PX, _SCROLL_STEP_MAX_PX)   for i in 1..n
-   ```
-   Preserve the sign of the original `deltaY`.
+2. **Choose step count**  
+   Draw `n ∈ [_SCROLL_STEPS_MIN, _SCROLL_STEPS_MAX]` uniformly at random.
 
-3. **Adjust the final step to honour the requested total**  
-   Real humans do reach their intended scroll position, they just do so gradually. To avoid drifting away from what the agent intended:
+3. **Compute bell-shaped base weights**  
+   Use a half-sine curve to derive per-step proportions:
    ```
-   total_raw   = sum(raw_i)
-   last_step   = |deltaY| - sum(raw_i for i in 1..n-1)
-   last_step   = clamp(last_step, _SCROLL_STEP_MIN_PX, _SCROLL_STEP_MAX_PX × 1.5)
+   w_i = sin(π × (i + 0.5) / n)   for i = 0 … n−1
    ```
-   If `last_step` would go negative or exceed the cap, distribute the remainder evenly across all `n` steps instead (scale each `raw_i` by `|deltaY| / total_raw`).
+   This yields a symmetric bell: the endpoint steps are `sin(π / (2n))` (smallest) and the centre step(s) approach 1.0 (largest).
 
-4. **Emit sub-scroll events**  
-   For each step `i`:
-   - Send a `mouseWheel` CDP event with the step's `deltaY` (and the original `deltaX`, `modifiers`, `x`, `y`).
-   - Sleep `U(_SCROLL_INTER_STEP_MIN_S, _SCROLL_INTER_STEP_MAX_S)` before the next step.
-   - On the first step only, optionally add a brief pre-scroll dwell `U(_SCROLL_DWELL_MIN_S, _SCROLL_DWELL_MAX_S)` to simulate the moment the user positions their fingers on the wheel.
+   Shape by step count:
 
-5. **Horizontal scroll**  
-   `deltaX ≠ 0` events follow the same algorithm applied to `deltaX`. Combined diagonal scroll (`deltaX` and `deltaY` both non-zero) splits each axis independently and interleaves the events.
+   | n | weights (approximate) |
+   |---|---|
+   | 3 | 0.50 · 1.00 · 0.50 |
+   | 4 | 0.38 · 0.92 · 0.92 · 0.38 |
+   | 5 | 0.31 · 0.81 · 1.00 · 0.81 · 0.31 |
+   | 6 | 0.26 · 0.71 · 0.97 · 0.97 · 0.71 · 0.26 |
+
+4. **Convert weights to proportional step sizes**  
+   Normalise so the base steps sum exactly to `|amount|`:
+   ```
+   W      = Σ w_i
+   raw_i  = |amount| × w_i / W
+   ```
+
+5. **Apply per-step jitter**  
+   Each step receives an independent multiplicative perturbation. The jitter magnitude itself is drawn per-step so no two steps share the same noise level:
+   ```
+   j_i      = U(_SCROLL_JITTER_MIN, _SCROLL_JITTER_MAX)   # magnitude: 10–20 %
+   dir_i    = choice(−1, +1)                               # random sign
+   scale_i  = 1 + dir_i × j_i
+   s_i      = raw_i × scale_i
+   ```
+
+6. **Re-normalise to preserve exact total**  
+   The jitter shifts the sum away from `|amount|`. Divide out the drift so the total never overshoots or undershoots the agent's intent:
+   ```
+   s_i_final = s_i × |amount| / Σ s_i
+   ```
+   This guarantees `Σ s_i_final = |amount|` exactly. The bell shape is preserved because re-normalisation is a uniform scalar — it scales every step by the same factor, leaving their relative proportions intact.
+
+7. **Emit sub-scroll events**  
+   Before the first step, sleep for a pre-scroll dwell `U(_SCROLL_DWELL_MIN_S, _SCROLL_DWELL_MAX_S)` to model the moment the user positions their fingers on the wheel. Then, for each notch step `i`:
+
+   a. **Sub-divide into micro-increments**: draw `m_i ∈ [_SCROLL_MICRO_STEPS_MIN, _SCROLL_MICRO_STEPS_MAX]` uniformly at random. Distribute `s_i_final[i]` evenly into `m_i` micro-deltas:
+      ```
+      μ_j = s_i_final[i] / m_i   for j = 0 … m_i − 1
+      ```
+      Equal subdivision keeps each micro-event the same size within a notch; the bell-shape variation between notches is preserved at the coarser level.
+
+   b. **Emit micro-events**: send `m_i` consecutive raw CDP `Input.dispatchMouseEvent(mouseWheel)` events at the viewport centre, each carrying `deltaX=0, deltaY=sign(amount) × μ_j`. Between consecutive micro-events sleep `U(_SCROLL_MICRO_INTER_MIN_S, _SCROLL_MICRO_INTER_MAX_S)` (skip the pause after the last micro-event of the notch).
+
+   c. **Inter-notch pause**: after all micro-events of notch `i` complete, sleep `U(_SCROLL_INTER_STEP_MIN_S, _SCROLL_INTER_STEP_MAX_S)` before notch `i+1` (skipped after the last notch).
+
+8. **Horizontal scroll**  
+   When `direction == "left"` or `"right"`, the same algorithm applies to `deltaX`. For combined diagonal scroll, each axis runs through its own independent bell decomposition (separate draws of `n` and jitter values); the resulting step sequences are interleaved alternately (one X notch, one Y notch, …).
 
 #### Parameters
 
-| Symbol | Proposed value | Meaning |
+| Symbol | Value | Meaning |
 |---|---|---|
 | `_SCROLL_SMALL_THRESHOLD` | 30 px | Pass-through threshold for tiny scrolls |
-| `_SCROLL_STEPS_MIN` | 3 | Minimum wheel-notch events per scroll |
-| `_SCROLL_STEPS_MAX` | 5 | Maximum wheel-notch events per scroll |
-| `_SCROLL_STEP_MIN_PX` | 50 px | Minimum delta per individual notch |
-| `_SCROLL_STEP_MAX_PX` | 100 px | Maximum delta per individual notch |
-| `_SCROLL_INTER_STEP_MIN_S` | 0.060 s | Minimum pause between notches |
-| `_SCROLL_INTER_STEP_MAX_S` | 0.180 s | Maximum pause between notches |
-| `_SCROLL_DWELL_MIN_S` | 0.050 s | Pre-scroll finger-placement pause (min) |
-| `_SCROLL_DWELL_MAX_S` | 0.150 s | Pre-scroll finger-placement pause (max) |
+| `_SCROLL_STEPS_MIN` | 3 | Minimum notch events per scroll |
+| `_SCROLL_STEPS_MAX` | 6 | Maximum notch events per scroll |
+| `_SCROLL_JITTER_MIN` | 0.10 | Minimum per-step jitter magnitude (10 %) |
+| `_SCROLL_JITTER_MAX` | 0.20 | Maximum per-step jitter magnitude (20 %) |
+| `_SCROLL_INTER_STEP_MIN_S` | 0.25 s | Minimum pause between notches |
+| `_SCROLL_INTER_STEP_MAX_S` | 0.60 s | Maximum pause between notches |
+| `_SCROLL_DWELL_MIN_S` | 0.30 s | Pre-scroll finger-placement pause (min) |
+| `_SCROLL_DWELL_MAX_S` | 0.70 s | Pre-scroll finger-placement pause (max) |
+| `_SCROLL_MICRO_STEPS_MIN` | 3 | Minimum micro-events per notch |
+| `_SCROLL_MICRO_STEPS_MAX` | 7 | Maximum micro-events per notch |
+| `_SCROLL_MICRO_INTER_MIN_S` | 0.008 s | Minimum pause between micro-events within a notch |
+| `_SCROLL_MICRO_INTER_MAX_S` | 0.020 s | Maximum pause between micro-events within a notch |
 
-**Example** — agent requests `deltaY = 800 px` (scroll down):
-- `n = 4` steps drawn.
-- Raw deltas: `[210, 175, 230, ?]`; sum of first 3 = 615; last step = 800 − 615 = 185 px (within range).
-- Emitted: `↓210`, sleep 95 ms, `↓175`, sleep 140 ms, `↓230`, sleep 75 ms, `↓185` — total 800 px, natural cadence.
+**Example** — agent requests `deltaY = 800 px` (scroll down), `n = 5` drawn:
+- Base weights: [0.309, 0.809, 1.000, 0.809, 0.309]; W ≈ 3.236
+- Raw steps (bell): [76, 200, 247, 200, 77] px — sum = 800
+- Per-step jitter magnitudes: [14 %, 18 %, 11 %, 20 %, 16 %]; directions: [−, +, −, +, −]
+- Scaled: [65, 236, 220, 240, 65] px — sum = 826
+- Re-normalised: [63, 229, 213, 233, 62] px — sum = 800 exactly
+- Micro-event counts drawn: [4, 6, 5, 4, 3]
+- Emitted sequence (dwell 490 ms first):
+  - Notch 1 (63 px → 4×15.75 px): `↓15.8` sleep 11ms `↓15.8` sleep 14ms `↓15.8` sleep 9ms `↓15.8` → inter-notch sleep 340 ms
+  - Notch 2 (229 px → 6×38.2 px): `↓38.2` sleep 17ms … (×5 more) → inter-notch sleep 270 ms
+  - Notch 3 (213 px → 5×42.6 px): `↓42.6` sleep 12ms … (×4 more) → inter-notch sleep 510 ms
+  - Notch 4 (233 px → 4×58.3 px): `↓58.3` sleep 19ms … (×3 more) → inter-notch sleep 390 ms
+  - Notch 5 (62 px → 3×20.7 px): `↓20.7` sleep 8ms `↓20.7` sleep 15ms `↓20.7`
 
 ---
 
@@ -394,11 +466,16 @@ scraper_base.py (import time)
   │    ├─ replace _type_to_page
   │    └─ wrap _input_text_element_node_impl
   │
-  └─ patch_mouse_movement()      [human_mouse.py]
-       ├─ set _VIZ_ENABLED from env / arg
-       ├─ import InputClient
-       ├─ guard: _human_mouse_patched?
-       └─ replace dispatchMouseEvent
+  ├─ patch_mouse_movement()      [human_mouse.py]
+  │    ├─ set _VIZ_ENABLED from env / arg
+  │    ├─ import InputClient
+  │    ├─ guard: _human_mouse_patched?
+  │    └─ replace dispatchMouseEvent
+  │
+  └─ patch_scroll_page()         [human_scrolling.py]
+       ├─ import DefaultActionWatchdog
+       ├─ guard: _human_scrolling_patched?
+       └─ replace on_ScrollEvent
 ```
 
 ---
@@ -419,8 +496,11 @@ Real humans frequently overshoot a target and then micro-correct (Fitts' law pre
 ### 5.4 Movement — No Speed Adaptation to Target Size
 Fitts' law: movement time `T = a + b × log2(2D/W)`. The current model only adapts to distance, not target width. Smaller targets should produce slower, more careful approach speeds.
 
-### 5.5 Scroll Events — addressed in §2.7
-Design specified in §2.7. Not yet implemented. The chosen model (3–5 notches of 150–250 px with 60–180 ms inter-notch pauses) covers wheel-notch fingerprinting. A further enhancement would be **momentum easing**: the first notch of a scroll sequence is slightly smaller than the peak, and the last notch decelerates, mirroring trackpad inertia. This is deferred to a later iteration.
+### 5.5 Scroll Events — implemented in `human_scrolling.py`
+The patch intercepts `DefaultActionWatchdog.on_ScrollEvent` (not `mouseWheel` CDP events — the installed browser-use routes LLM page scrolls through `synthesizeScrollGesture`, never `mouseWheel`). The two-tier delivery model drives raw `Input.dispatchMouseEvent(mouseWheel)` calls via `cdp_client.send_raw` at the viewport centre:
+
+- **Tier 1 (notch level)**: bell-shaped decomposition (half-sine weights, 10–20 % per-step jitter, re-normalised to exact total), 250–600 ms inter-notch pauses.
+- **Tier 2 (micro-event level)**: each notch is subdivided into 3–7 equal micro-events fired 8–20 ms apart, modelling the rapid burst of OS wheel-rotation ticks that a single physical detent produces.
 
 ### 5.6 Keyboard — No Key-Down Hold Variation
 `keyDown` and `keyUp` events are dispatched back-to-back with no delay between them (the per-character delay follows `keyUp`). Real typists hold keys for 60–120 ms. The key-down-hold duration should vary per key (longer for modifier keys, shorter for fast-typed common letters).
@@ -447,32 +527,39 @@ DefaultActionWatchdog
   │   (primary typing path)                                                 │
   │   asyncio.sleep(< 20ms) → intercepted → _human_delay()                │
   │                                                                         │
-  └─ _type_to_page                                                          │
-      (fallback typing path)                                                │
-      rewritten: keyDown/char/keyUp + _human_delay() per char              │
-                                                                            │
-browser_use click / move / scroll                                           │
-       │                                                                     │
-       ▼                                                                     │
-InputClient.dispatchMouseEvent (patched)                                    │
-  ├─ mouseMoved                                                              │
-  │   ├─ suppress if already inside target element                          │
-  │   └─ Bézier path (n steps, async sleep per step, ease-in-out-sine)     │
-  │                                                                          │
-  ├─ mousePressed                                                            │
-  │   ├─ query element bounds                                                │
-  │   ├─ if already inside: dwell only                                       │
-  │   └─ else: 2–4 hover micro-moves → dwell → Gaussian click offset        │
-  │                                                                          │
-  ├─ mouseReleased                                                            │
-  │   ├─ hold delay (50–150ms or override)                                   │
-  │   ├─ release at press coords                                              │
-  │   └─ lift-off drift move                                                 │
-  │                                                                           │
-  └─ mouseWheel                                                               │
-      ├─ if |deltaY| < 100 px: pass through unchanged                        │
-      └─ else: 3–5 sub-notches (150–250 px each) + 60–180 ms inter-pause    │
-                                                                             │
+  ├─ _type_to_page                                                          │
+  │   (fallback typing path)                                                │
+  │   rewritten: keyDown/char/keyUp + _human_delay() per char              │
+  │                                                                         │
+  └─ on_ScrollEvent (patched)                                              │
+      element scroll (node≠None): delegates to original handler unchanged  │
+      page scroll: browser-use uses synthesizeScrollGesture, not          │
+        mouseWheel — on_ScrollEvent is the correct intercept point         │
+      ├─ if |amount| < 30 px: single mouseWheel CDP event (no dwell)       │
+      └─ else: dwell 300–700 ms, then 3–6 bell-shaped notches             │
+              (half-sine weights, ±10–20 % jitter, re-normalised)         │
+              each notch → 3–7 micro-events (8–20 ms apart)               │
+              emitted via cdp_client.send_raw(mouseWheel) at viewport      │
+              centre; 250–600 ms inter-notch pauses between detents        │
+                                                                           │
+browser_use click / move                                                   │
+       │                                                                   │
+       ▼                                                                   │
+InputClient.dispatchMouseEvent (patched)                                  │
+  ├─ mouseMoved                                                            │
+  │   ├─ suppress if already inside target element                        │
+  │   └─ Bézier path (n steps, async sleep per step, ease-in-out-sine)   │
+  │                                                                        │
+  ├─ mousePressed                                                          │
+  │   ├─ query element bounds                                              │
+  │   ├─ if already inside: dwell only                                     │
+  │   └─ else: 2–4 hover micro-moves → dwell → Gaussian click offset      │
+  │                                                                        │
+  └─ mouseReleased                                                         │
+      ├─ hold delay (50–150ms or override)                                 │
+      ├─ release at press coords                                           │
+      └─ lift-off drift move                                               │
+                                                                           │
              _human_delay() ◄──────────────────────────────────────────────┘
              U(50,150ms) + 8% × U(150,400ms) hesitation
 ```
