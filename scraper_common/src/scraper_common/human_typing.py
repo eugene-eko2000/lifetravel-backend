@@ -1,6 +1,8 @@
 """
 Patches browser_use's DefaultActionWatchdog to use human-like inter-keystroke
-timing instead of the default ≤10 ms robotic delays.
+timing instead of the default ≤10 ms robotic delays, and to prefix each typing
+action with a human-style pre-typing focus sequence (mouse move → click →
+post-focus dwell).
 
 Call patch_watchdog_typing() once at import time (scraper_base.py does this).
 The patches are idempotent and safe to call multiple times.
@@ -17,6 +19,14 @@ _MAX_DELAY = 0.15    # 150 ms — normal typing speed
 _HESITATION_PROB = 0.08        # 8 % chance of a mid-word pause
 _HESITATION_EXTRA = (0.15, 0.40)  # extra 150–400 ms on hesitation
 
+# Pre-typing focus sequence timing
+_PRE_TYPE_POST_CLICK_MIN_S = 2.75  # min pause between click release and first keystroke
+_PRE_TYPE_POST_CLICK_MAX_S = 3.55  # max pause between click release and first keystroke
+
+# Element size trust range — mirrors human_mouse._BOUNDS_MIN/MAX_PX
+_BOUNDS_MIN_PX = 8.0
+_BOUNDS_MAX_PX = 400.0
+
 
 def _human_delay() -> float:
     """Return a randomised human-like inter-keystroke delay in seconds."""
@@ -26,18 +36,79 @@ def _human_delay() -> float:
     return delay
 
 
+async def _pre_type_focus_sequence(cdp_session, cx: float, cy: float) -> None:
+    """
+    Execute the human-style pre-typing focus sequence at element centre (cx, cy).
+
+    The three dispatchMouseEvent calls go through the already-patched
+    InputClient.dispatchMouseEvent, so the full simulation stack fires:
+      mouseMoved    → Bézier curved path, ease-in-out-sine, tremor
+      mousePressed  → hover micro-moves (skipped if cursor already on target)
+                      + dwell pause + Gaussian click offset
+      mouseReleased → hold delay + release + lift-off drift
+    Post-click dwell lets JS focus/focusin handlers settle before keystrokes.
+    """
+    input_client = cdp_session.cdp_client.send.Input
+    session_id = cdp_session.session_id
+
+    await input_client.dispatchMouseEvent(
+        params={
+            "type": "mouseMoved",
+            "x": round(cx),
+            "y": round(cy),
+            "button": "none",
+            "buttons": 0,
+            "modifiers": 0,
+            "pointerType": "mouse",
+        },
+        session_id=session_id,
+    )
+    await input_client.dispatchMouseEvent(
+        params={
+            "type": "mousePressed",
+            "x": round(cx),
+            "y": round(cy),
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+            "modifiers": 0,
+            "pointerType": "mouse",
+        },
+        session_id=session_id,
+    )
+    await input_client.dispatchMouseEvent(
+        params={
+            "type": "mouseReleased",
+            "x": round(cx),
+            "y": round(cy),
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+            "modifiers": 0,
+            "pointerType": "mouse",
+        },
+        session_id=session_id,
+    )
+    await asyncio.sleep(random.uniform(_PRE_TYPE_POST_CLICK_MIN_S, _PRE_TYPE_POST_CLICK_MAX_S))
+
+
 def patch_watchdog_typing() -> None:
     """
     Replace the two typing implementations in DefaultActionWatchdog with
-    versions that use _human_delay() between every keystroke.
+    versions that prefix each typing action with a pre-typing focus sequence
+    and use _human_delay() between every keystroke.
 
     Strategy
     --------
     * _type_to_page      – simple method; fully rewritten here.
-    * _input_text_element_node_impl – complex (200+ lines); instead of copying
-      it, we install a per-call proxy for asyncio.sleep in the watchdog
-      module's namespace.  Only sub-20 ms sleeps (the inter-keystroke ones)
-      are replaced; longer sleeps (scroll waits, etc.) pass through unchanged.
+      Pre-typing coords come from document.activeElement.getBoundingClientRect().
+    * _input_text_element_node_impl – complex (200+ lines); two-layer wrapping:
+      Outer: pre-typing focus sequence using get_element_coordinates() on the
+             element_node, then delegates to the original.
+      Inner: asyncio proxy installed in the watchdog module's namespace intercepts
+             per-keystroke asyncio.sleep calls and replaces them with _human_delay().
+             Sub-20 ms sleeps (inter-keystroke: 1 ms, 5 ms, 10 ms) are replaced;
+             longer sleeps (scroll waits, etc.) pass through unchanged.
     """
     try:
         import browser_use.browser.watchdogs.default_action_watchdog as _wdog_mod
@@ -57,8 +128,6 @@ def patch_watchdog_typing() -> None:
 
     class _AsyncioProxy:
         """Module-level proxy; all attrs delegate to the real asyncio."""
-        # sleep is set as an instance attribute below so it can be swapped
-        # per-call without affecting the class.
         def __getattr__(self, name: str):
             return getattr(_real_asyncio, name)
 
@@ -67,14 +136,55 @@ def patch_watchdog_typing() -> None:
     _wdog_mod.asyncio = _proxy          # watchdog module now sees the proxy
 
     # ── Patch 1: _type_to_page (fallback typing path) ─────────────────────────
-    # Rewrite of the original; only change is replacing asyncio.sleep(0.010)
-    # with _human_delay().
+    # Full rewrite. Prepends pre-typing focus sequence using the currently
+    # focused element's viewport coordinates, then types character by character.
 
     async def _human_type_to_page(self, text: str) -> None:
         try:
             cdp_session = await self.browser_session.get_or_create_cdp_session(
                 target_id=None, focus=True
             )
+
+            # Pre-typing focus sequence: query the currently focused element,
+            # move the mouse to it, and click to simulate human focus intent.
+            # Skipped if no focused element is found or bounds are outside the
+            # trust range — typing proceeds normally in that case.
+            try:
+                res = await cdp_session.cdp_client.send_raw(
+                    method="Runtime.evaluate",
+                    params={
+                        "expression": (
+                            "(function(){"
+                            "var e=document.activeElement;"
+                            "if(!e||e===document.body||e===document.documentElement)return null;"
+                            "var r=e.getBoundingClientRect();"
+                            "return [r.left,r.top,r.width,r.height];"
+                            "})()"
+                        ),
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                        "silent": True,
+                    },
+                    session_id=cdp_session.session_id,
+                )
+                val = (res or {}).get("result", {}).get("value")
+                if val and len(val) == 4:
+                    bx, by, bw, bh = map(float, val)
+                    if _BOUNDS_MIN_PX <= bw <= _BOUNDS_MAX_PX and _BOUNDS_MIN_PX <= bh <= _BOUNDS_MAX_PX:
+                        await _pre_type_focus_sequence(cdp_session, bx + bw / 2, by + bh / 2)
+                        logger.debug(
+                            "Pre-type focus completed for active element (%.0fx%.0f) at (%.0f,%.0f)",
+                            bw, bh, bx + bw / 2, by + bh / 2,
+                        )
+                    else:
+                        logger.debug(
+                            "Pre-type focus skipped — active element outside trust range (%.0fx%.0f)", bw, bh
+                        )
+                else:
+                    logger.debug("Pre-type focus skipped — no valid active element")
+            except Exception as exc:
+                logger.debug("Pre-type focus sequence failed, proceeding without it: %s", exc)
+
             for char in text:
                 if char == "\n":
                     for params in [
@@ -103,23 +213,52 @@ def patch_watchdog_typing() -> None:
     DefaultActionWatchdog._type_to_page = _human_type_to_page
 
     # ── Patch 2: _input_text_element_node_impl (primary typing path) ──────────
-    # Wrap the original so that for the duration of each call the proxy's
-    # .sleep attribute becomes a human-speed version.  Sub-20 ms delays
-    # (the inter-keystroke ones: 1 ms, 5 ms, 10 ms) become _human_delay();
-    # larger delays (scroll waits, etc.) pass through unchanged.
+    # Wrap the original with two layers:
+    #   Outer: pre-typing focus sequence using get_element_coordinates().
+    #   Inner: asyncio proxy (already in watchdog globals) intercepts per-keystroke
+    #          sleeps. The proxy is installed first (module-level); the outer
+    #          wrapper is applied second (method-level). They compose cleanly.
 
     _orig_impl = DefaultActionWatchdog._input_text_element_node_impl
 
     async def _human_input_text_impl(
         self, element_node, text, clear=True, is_sensitive=False
     ):
+        # Outer wrapper: pre-typing focus sequence.
+        # Uses the same get_element_coordinates() that the original method
+        # calls internally, so no extra CDP round-trips are introduced.
+        try:
+            cdp_session = await self.browser_session.cdp_client_for_node(element_node)
+            coords = await self.browser_session.get_element_coordinates(
+                element_node.backend_node_id, cdp_session
+            )
+            if coords is not None:
+                if _BOUNDS_MIN_PX <= coords.width <= _BOUNDS_MAX_PX and _BOUNDS_MIN_PX <= coords.height <= _BOUNDS_MAX_PX:
+                    cx = coords.x + coords.width / 2
+                    cy = coords.y + coords.height / 2
+                    await _pre_type_focus_sequence(cdp_session, cx, cy)
+                    logger.debug(
+                        "Pre-type focus completed for element (%.0fx%.0f) at (%.0f,%.0f)",
+                        coords.width, coords.height, cx, cy,
+                    )
+                else:
+                    logger.debug(
+                        "Pre-type focus skipped — element dimensions outside trust range (%.0fx%.0f)",
+                        coords.width, coords.height,
+                    )
+            else:
+                logger.debug("Pre-type focus skipped — could not resolve element coordinates")
+        except Exception as exc:
+            logger.debug("Pre-type focus sequence failed, proceeding without it: %s", exc)
+
+        # Inner: asyncio proxy for per-keystroke timing (already installed above).
         _saved_sleep = _proxy.sleep
 
         async def _fast_to_human(delay: float) -> None:
-            if delay < 0.02:
+            if delay < 0.02:           # inter-keystroke sleep (1 ms, 5 ms, 10 ms)
                 await _real_asyncio.sleep(_human_delay())
             else:
-                await _real_asyncio.sleep(delay)
+                await _real_asyncio.sleep(delay)   # scroll waits etc. pass through
 
         _proxy.sleep = _fast_to_human
         try:
@@ -134,8 +273,10 @@ def patch_watchdog_typing() -> None:
     DefaultActionWatchdog._human_typing_patched = True
     logger.info(
         "Human-typing patches applied to DefaultActionWatchdog "
-        "(delay %.0f–%.0f ms, hesitation %.0f%% +%.0f–%.0f ms)",
+        "(delay %.0f–%.0f ms, hesitation %.0f%% +%.0f–%.0f ms, "
+        "pre-type post-click dwell %.0f–%.0f ms)",
         _MIN_DELAY * 1000, _MAX_DELAY * 1000,
         _HESITATION_PROB * 100,
         _HESITATION_EXTRA[0] * 1000, _HESITATION_EXTRA[1] * 1000,
+        _PRE_TYPE_POST_CLICK_MIN_S * 1000, _PRE_TYPE_POST_CLICK_MAX_S * 1000,
     )

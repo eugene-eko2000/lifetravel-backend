@@ -16,6 +16,11 @@ do not silently switch to another site.
 
 ## Behave Like a Human
 Travel websites use bot-detection systems. You must behave naturally at all times:
+- Set the browser window size to random width and height at the beginning, but larger
+  than the screen size (e.g. width: 1200–1600px, height: 1200–1600px), the height should be
+  minimum 1200px
+- Always put the mouse pointer into a random position on the screen at the beginning 
+  before the interaction starting
 - Wait for each page to fully load and settle before interacting with anything
 - **Page exploration before the form**: after the page loads, scroll one page down
   and then scroll one page up
@@ -80,14 +85,6 @@ When the task lists multiple date combinations to search:
 - Click the Search / Explore button ONCE
 - Wait for the results page to fully load (flight cards with prices must be visible)
 - Do NOT click Search again while results are loading
-
-## Behave Like a Human
-Travel websites use bot-detection systems. You must behave naturally at all times:
-- If you see a 'Verify you are human' checkbox, stop all other actions. Move the
-  mouse slowly to the checkbox, click it once, and wait 10 seconds without moving
-  the mouse to allow the verification to process.
-- If you are seeing a Press & Hold button, then do nothing and wait for 120 seconds.
-  Do not try to click it repeatedly or interact with it in any way.
 
 ## Data Extraction
 From each visible flight card, collect:

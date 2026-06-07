@@ -2,7 +2,7 @@
 
 **Module**: `scraper_common.human_mouse`, `scraper_common.human_typing`, `scraper_common.human_scrolling`  
 **Entry points**: `patch_mouse_movement()`, `patch_watchdog_typing()`, `patch_scroll_page()`  
-**Status**: Implemented (this document reverse-engineers the current state)
+**Status**: Fully implemented
 
 ---
 
@@ -15,14 +15,15 @@ The goal is to make browser automation indistinguishable from real human interac
 - Click position within element bounds
 - Mouse button press-hold durations
 - Post-click cursor drift
+- Absence of a mouse-move + click preceding text input (programmatic typing without focus interaction)
 
 The patches operate at the **lowest possible interception level** to maximise coverage with minimal code duplication:
 
 | Layer | What is patched | File |
 |---|---|---|
 | `cdp_use.InputClient.dispatchMouseEvent` | All CDP mouse events | `human_mouse.py` |
-| `browser_use.DefaultActionWatchdog._type_to_page` | Fallback typing path | `human_typing.py` |
-| `browser_use.DefaultActionWatchdog._input_text_element_node_impl` | Primary typing path (via asyncio proxy) | `human_typing.py` |
+| `browser_use.DefaultActionWatchdog._type_to_page` | Fallback typing path — prefixed with pre-typing focus sequence (mouse move + click) | `human_typing.py` |
+| `browser_use.DefaultActionWatchdog._input_text_element_node_impl` | Primary typing path — outer wrapper for pre-typing focus sequence + inner asyncio proxy for keystroke timing | `human_typing.py` |
 | `browser_use.DefaultActionWatchdog.on_ScrollEvent` | LLM-initiated page scroll commands | `human_scrolling.py` |
 
 All patches are **idempotent** (guarded by `_human_typing_patched` / `_human_mouse_patched` / `_human_scrolling_patched` flags) and registered once at startup from `scraper_base.py`.
@@ -117,8 +118,8 @@ If `distance < 200 px` and a bounding-box query confirms `(_mouse_x, _mouse_y)` 
 | `_HOVER_SIGMA` | 1.5 px |
 | `_HOVER_STEP_MIN_S` | 0.012 s |
 | `_HOVER_STEP_MAX_S` | 0.030 s |
-| `_DWELL_MIN_S` | 0.20 s |
-| `_DWELL_MAX_S` | 0.50 s |
+| `_DWELL_MIN_S` | 0.35 s |
+| `_DWELL_MAX_S` | 0.65 s |
 
 ---
 
@@ -392,6 +393,56 @@ Updates are fire-and-forget `asyncio.Task`s. If `Runtime.evaluate` raises, viz i
 
 ## 3. Keyboard Simulation (`human_typing.py`)
 
+### 3.0 Pre-Typing Focus Sequence
+
+#### Motivation
+
+When a human types into a web form they first move the mouse to the input field, click it to give it keyboard focus, wait briefly for focus handlers to settle, and only then begin pressing keys. Bot-detection systems flag text-input CDP events that arrive without a preceding click on the target element — this is one of the clearest programmatic-typing signals. Both typing paths must therefore be prefixed with a complete human-style focus interaction using the existing mouse simulation infrastructure.
+
+#### Algorithm
+
+1. **Resolve element coordinates**  
+   Call `_query_element_bounds(client, session_id, x, y)` (the same helper used in §2.3 / §2.4) with the element's nominal centre coordinates. If the query fails or returns a distrusted bounding box (outside `[8, 400] px`), the pre-typing sequence is **skipped** and typing begins immediately.
+
+2. **Mouse move to element** (`mouseMoved`)  
+   Dispatch a synthetic `Input.dispatchMouseEvent(mouseMoved)` targeting the element's centre `(bx + bw/2, by + bh/2)`. Because `InputClient.dispatchMouseEvent` is already patched by `patch_mouse_movement()`, this single call automatically executes:
+   - Suppression check — if the cursor is already inside the element, the move is suppressed and the path is skipped entirely (§2.2 special case)
+   - Cubic Bézier curved path from current cursor position (§2.2)
+   - Asymmetric ease-in-out-sine timing (§2.2)
+   - Gaussian tremor on intermediate waypoints (§2.2)
+
+3. **Click to focus** (`mousePressed` + `mouseReleased`)  
+   Dispatch `mousePressed` then `mouseReleased` at the element centre. The existing mouse patch automatically executes:
+   - Hover micro-moves (2–4 steps, §2.3) — may be skipped if the cursor arrived inside the element at step 2
+   - Dwell pause `U(200, 500) ms` (§2.3)
+   - Click position Gaussian offset (§2.4)
+   - Click hold `U(50, 150) ms` + lift-off drift (§2.5)
+
+4. **Post-focus dwell**  
+   Sleep `U(_PRE_TYPE_POST_CLICK_MIN_S, _PRE_TYPE_POST_CLICK_MAX_S)` before the first keystroke. This gap lets the browser dispatch `focus` / `focusin` events and gives any JS focus handler time to run (e.g. clearing placeholder text, opening dropdowns) before keyboard events arrive.
+
+#### Parameters
+
+| Symbol | Value | Meaning |
+|---|---|---|
+| `_PRE_TYPE_POST_CLICK_MIN_S` | 2.75 s | Minimum pause between click release and first keystroke |
+| `_PRE_TYPE_POST_CLICK_MAX_S` | 3.55 s | Maximum pause between click release and first keystroke |
+
+#### Patching Strategy
+
+Both typing paths gain an outer method-level wrapper for the focus sequence, applied inside `patch_watchdog_typing()`:
+
+- **`_input_text_element_node_impl`** (primary path): a new async wrapper replaces the method. It runs the pre-typing focus sequence, then delegates to the original method (which already has the `asyncio` proxy installed for keystroke timing). The element node object carries the nodeId which is resolved to viewport coordinates via `DOM.getBoxModel` or `Runtime.evaluate(node.getBoundingClientRect())`.
+- **`_type_to_page`** (fallback path): the full rewrite already owns the method body, so the focus sequence is prepended directly at the top.
+
+In both cases the pre-typing focus sequence executes through `InputClient.dispatchMouseEvent`, meaning it benefits from all mouse simulation logic automatically and requires no duplication of movement or click code.
+
+#### Interaction with Existing Cursor State
+
+The mouse move dispatched in step 2 updates the process-global `_mouse_x / _mouse_y` state (§2.1) exactly as any other human move would. After the click sequence completes, the cursor sits near the element (within the lift-off drift, §2.5). The subsequent keystroke events are unaffected.
+
+---
+
 ### 3.1 Patching Strategy
 
 `DefaultActionWatchdog._input_text_element_node_impl` is a 200+ line method. Rather than copying it, the patch installs a **module-level asyncio proxy** in the watchdog module's namespace:
@@ -432,15 +483,27 @@ This produces a bimodal distribution: a fast mode centred around 100 ms (normal 
 
 ### 3.3 Patch 1 — `_type_to_page` (Fallback Path)
 
-Full rewrite. Sends raw CDP `Input.dispatchKeyEvent` events via a CDPSession:
+Full rewrite. Method body structure:
 
-- For `\n`: dispatches `keyDown(Enter)` + `char(\r)` + `keyUp(Enter)`.
-- For all other characters: dispatches `keyDown(char)` + `char(char)` + `keyUp(char)`.
-- Calls `_human_delay()` after each character's three events.
+1. **Pre-typing focus sequence** (§3.0): resolve element coords → `mouseMoved` → `mousePressed` → `mouseReleased` → post-focus dwell.
+2. **Keystroke loop** via raw CDP `Input.dispatchKeyEvent` events:
+   - For `\n`: dispatches `keyDown(Enter)` + `char(\r)` + `keyUp(Enter)`.
+   - For all other characters: dispatches `keyDown(char)` + `char(char)` + `keyUp(char)`.
+   - Calls `_human_delay()` after each character's three events.
 
 ### 3.4 Patch 2 — `_input_text_element_node_impl` (Primary Path)
 
-Wraps the original method with a per-call sleep swap:
+The primary path receives **two layers of wrapping**, both applied inside `patch_watchdog_typing()`:
+
+1. **Outer wrapper** — prepends the pre-typing focus sequence (§3.0): mouse move → click → post-focus dwell. This replaces the method on `DefaultActionWatchdog` and calls the original (inner) method after the focus sequence completes.
+
+2. **Inner asyncio proxy** — installed in the watchdog module's global namespace (see §3.1). It intercepts per-character `asyncio.sleep` calls inside the original method body and replaces them with `_human_delay()`.
+
+The outer wrapper handles pre-typing interaction; the inner proxy handles keystroke timing. They are independent and compose cleanly: the proxy is installed first (module-level), the outer wrapper is applied second (method-level).
+
+The outer wrapper resolves element coordinates from the `element_node` parameter via `Runtime.evaluate(node.getBoundingClientRect())` using the CDP client extracted from `self.browser_session`.
+
+**Inner asyncio proxy sleep swap (unchanged from current implementation):**
 
 ```python
 async def _fast_to_human(delay: float) -> None:
@@ -459,24 +522,34 @@ The `< 20 ms` threshold targets the original watchdog's inter-keystroke `asyncio
 ```
 scraper_base.py (import time)
   │
-  ├─ patch_watchdog_typing()     [human_typing.py]
-  │    ├─ import DefaultActionWatchdog
-  │    ├─ guard: _human_typing_patched?
-  │    ├─ install asyncio proxy in watchdog module globals
-  │    ├─ replace _type_to_page
-  │    └─ wrap _input_text_element_node_impl
-  │
-  ├─ patch_mouse_movement()      [human_mouse.py]
+  ├─ patch_mouse_movement()      [human_mouse.py]        ← MUST run first
   │    ├─ set _VIZ_ENABLED from env / arg
   │    ├─ import InputClient
   │    ├─ guard: _human_mouse_patched?
   │    └─ replace dispatchMouseEvent
+  │         (the typing patch calls dispatchMouseEvent, so mouse must be
+  │          patched before typing to get human-style moves on pre-type focus)
+  │
+  ├─ patch_watchdog_typing()     [human_typing.py]
+  │    ├─ import DefaultActionWatchdog
+  │    ├─ guard: _human_typing_patched?
+  │    ├─ install asyncio proxy in watchdog module globals
+  │    │    (intercepts per-keystroke asyncio.sleep for _input_text_element_node_impl)
+  │    ├─ replace _type_to_page
+  │    │    └─ new body: pre-typing focus sequence (§3.0) → keyDown/char/keyUp loop
+  │    └─ wrap _input_text_element_node_impl with outer wrapper
+  │         ├─ outer: pre-typing focus sequence (§3.0)
+  │         │         resolve coords → mouseMoved → mousePressed → mouseReleased
+  │         │         → post-focus dwell → call original
+  │         └─ inner: asyncio proxy already in place for keystroke timing
   │
   └─ patch_scroll_page()         [human_scrolling.py]
        ├─ import DefaultActionWatchdog
        ├─ guard: _human_scrolling_patched?
        └─ replace on_ScrollEvent
 ```
+
+**Startup order requirement**: `patch_mouse_movement()` must be called before `patch_watchdog_typing()`. The typing patch dispatches `mouseMoved` / `mousePressed` / `mouseReleased` events via `InputClient.dispatchMouseEvent`; if the mouse patch has not yet been applied those calls bypass the Bézier / hover / dwell logic entirely. `scraper_base.py` must preserve this ordering.
 
 ---
 
@@ -502,16 +575,24 @@ The patch intercepts `DefaultActionWatchdog.on_ScrollEvent` (not `mouseWheel` CD
 - **Tier 1 (notch level)**: bell-shaped decomposition (half-sine weights, 10–20 % per-step jitter, re-normalised to exact total), 250–600 ms inter-notch pauses.
 - **Tier 2 (micro-event level)**: each notch is subdivided into 3–7 equal micro-events fired 8–20 ms apart, modelling the rapid burst of OS wheel-rotation ticks that a single physical detent produces.
 
-### 5.6 Keyboard — No Key-Down Hold Variation
+### 5.6 Pre-Typing Focus Sequence — Implemented
+
+Both typing paths now execute the pre-typing focus sequence described in §3.0 before sending any keystroke events.
+
+- **`_input_text_element_node_impl`**: coordinates are resolved via `self.browser_session.get_element_coordinates(element_node.backend_node_id, cdp_session)`, which tries `DOM.getContentQuads` → `DOM.getBoxModel` → `Runtime.callFunctionOn(getBoundingClientRect)` in order. The `cdp_session` comes from `self.browser_session.cdp_client_for_node(element_node)`.
+- **`_type_to_page`**: coordinates are resolved by evaluating `document.activeElement.getBoundingClientRect()` via `Runtime.evaluate`. This works because the LLM typically clicks an element before the fallback typing path is invoked, leaving it as `document.activeElement`.
+- In both cases the sequence is silently skipped if coordinates cannot be resolved or fall outside the `[8, 400] px` trust range.
+
+### 5.7 Keyboard — No Key-Down Hold Variation
 `keyDown` and `keyUp` events are dispatched back-to-back with no delay between them (the per-character delay follows `keyUp`). Real typists hold keys for 60–120 ms. The key-down-hold duration should vary per key (longer for modifier keys, shorter for fast-typed common letters).
 
-### 5.7 Keyboard — No Typo / Correction Simulation
+### 5.8 Keyboard — No Typo / Correction Simulation
 Humans make typos and correct them. Injecting occasional `Backspace` sequences (with higher probability on long words) would further defeat ML-based behavioural classifiers trained on error-free bot input.
 
-### 5.8 No Randomised Start Position
+### 5.9 No Randomised Start Position
 `_mouse_x/_mouse_y` initialises to `(100, 100)`. If the first event on a fresh page is a click, the cursor starts at a fixed position. A random initial position within the viewport would remove this artefact.
 
-### 5.9 Viz Overlay — Fixed-element Pages
+### 5.10 Viz Overlay — Fixed-element Pages
 The overlay uses `position:fixed` which works on most pages. On pages that override `<html>` transform or use custom compositor layers, the overlay may not track correctly. Low-priority since viz is a debug aid only.
 
 ---
@@ -523,44 +604,63 @@ browser_use action
        │
        ▼
 DefaultActionWatchdog
-  ├─ _input_text_element_node_impl   ──────────────────────────────────────┐
-  │   (primary typing path)                                                 │
-  │   asyncio.sleep(< 20ms) → intercepted → _human_delay()                │
-  │                                                                         │
-  ├─ _type_to_page                                                          │
-  │   (fallback typing path)                                                │
-  │   rewritten: keyDown/char/keyUp + _human_delay() per char              │
-  │                                                                         │
-  └─ on_ScrollEvent (patched)                                              │
-      element scroll (node≠None): delegates to original handler unchanged  │
-      page scroll: browser-use uses synthesizeScrollGesture, not          │
-        mouseWheel — on_ScrollEvent is the correct intercept point         │
-      ├─ if |amount| < 30 px: single mouseWheel CDP event (no dwell)       │
-      └─ else: dwell 300–700 ms, then 3–6 bell-shaped notches             │
-              (half-sine weights, ±10–20 % jitter, re-normalised)         │
-              each notch → 3–7 micro-events (8–20 ms apart)               │
-              emitted via cdp_client.send_raw(mouseWheel) at viewport      │
-              centre; 250–600 ms inter-notch pauses between detents        │
-                                                                           │
-browser_use click / move                                                   │
-       │                                                                   │
-       ▼                                                                   │
-InputClient.dispatchMouseEvent (patched)                                  │
-  ├─ mouseMoved                                                            │
-  │   ├─ suppress if already inside target element                        │
-  │   └─ Bézier path (n steps, async sleep per step, ease-in-out-sine)   │
-  │                                                                        │
-  ├─ mousePressed                                                          │
-  │   ├─ query element bounds                                              │
-  │   ├─ if already inside: dwell only                                     │
-  │   └─ else: 2–4 hover micro-moves → dwell → Gaussian click offset      │
-  │                                                                        │
-  └─ mouseReleased                                                         │
-      ├─ hold delay (50–150ms or override)                                 │
-      ├─ release at press coords                                           │
-      └─ lift-off drift move                                               │
-                                                                           │
-             _human_delay() ◄──────────────────────────────────────────────┘
+  ├─ _input_text_element_node_impl   ──────────────────────────────────────────┐
+  │   (primary typing path)                                                     │
+  │                                                                             │
+  │   [outer wrapper — pre-typing focus sequence]                              │
+  │   1. query element bounds → getBoundingClientRect()                        │
+  │   2. dispatchMouseEvent(mouseMoved, elem_centre)  ──────────────────────►──┤
+  │        → Bézier path, ease-in-out-sine, hover suppress if on-target        │
+  │   3. dispatchMouseEvent(mousePressed, elem_centre) ─────────────────────►──┤
+  │        → hover micro-moves (or skip) → dwell → Gaussian click offset       │
+  │   4. dispatchMouseEvent(mouseReleased, click_pos) ──────────────────────►──┤
+  │        → hold 50–150 ms → release → lift-off drift                        │
+  │   5. asyncio.sleep U(100, 300 ms)  [post-focus dwell]                     │
+  │                                                                             │
+  │   [inner asyncio proxy — keystroke timing]                                 │
+  │   asyncio.sleep(< 20ms) → intercepted → _human_delay()                    │
+  │                                                                             │
+  ├─ _type_to_page                                                              │
+  │   (fallback typing path — full rewrite)                                    │
+  │                                                                             │
+  │   [pre-typing focus sequence — same as above]                              │
+  │   1. query element bounds                                                   │
+  │   2–4. dispatchMouseEvent: mouseMoved → mousePressed → mouseReleased  ───►─┤
+  │   5. asyncio.sleep U(100, 300 ms)  [post-focus dwell]                     │
+  │                                                                             │
+  │   [keystroke loop]                                                         │
+  │   keyDown/char/keyUp + _human_delay() per character                        │
+  │                                                                             │
+  └─ on_ScrollEvent (patched)                                                  │
+      element scroll (node≠None): delegates to original handler unchanged      │
+      page scroll: browser-use uses synthesizeScrollGesture, not               │
+        mouseWheel — on_ScrollEvent is the correct intercept point             │
+      ├─ if |amount| < 30 px: single mouseWheel CDP event (no dwell)           │
+      └─ else: dwell 300–700 ms, then 3–6 bell-shaped notches                 │
+              (half-sine weights, ±10–20 % jitter, re-normalised)             │
+              each notch → 3–7 micro-events (8–20 ms apart)                   │
+              emitted via cdp_client.send_raw(mouseWheel) at viewport          │
+              centre; 250–600 ms inter-notch pauses between detents            │
+                                                                               │
+browser_use click / move  ◄────────────────────────────────────────────────────┘
+       │                   (typing patch calls dispatchMouseEvent for focus)
+       ▼
+InputClient.dispatchMouseEvent (patched)
+  ├─ mouseMoved
+  │   ├─ suppress if already inside target element
+  │   └─ Bézier path (n steps, async sleep per step, ease-in-out-sine)
+  │
+  ├─ mousePressed
+  │   ├─ query element bounds
+  │   ├─ if already inside: dwell only
+  │   └─ else: 2–4 hover micro-moves → dwell → Gaussian click offset
+  │
+  └─ mouseReleased
+      ├─ hold delay (50–150ms or override)
+      ├─ release at press coords
+      └─ lift-off drift move
+
+             _human_delay() ← used by both typing paths for per-keystroke timing
              U(50,150ms) + 8% × U(150,400ms) hesitation
 ```
 
@@ -570,7 +670,8 @@ InputClient.dispatchMouseEvent (patched)                                  │
 
 The patches are validated empirically:
 
-1. **Visualization** (`HEADLESS=false`): watch the red-dot overlay trace natural curved paths.
-2. **CDP event log**: record events with a CDP proxy logger; verify velocity profiles and inter-keystroke histograms.
+1. **Visualization** (`HEADLESS=false`): watch the red-dot overlay trace natural curved paths including the pre-typing mouse move to the input field and the focus click before keystrokes begin.
+2. **CDP event log**: record events with a CDP proxy logger; verify velocity profiles and inter-keystroke histograms. For typing actions, confirm that the event stream contains `mouseMoved` + `mousePressed` + `mouseReleased` before the first `keyDown`, with realistic timing gaps.
 3. **Detection canaries**: run the scraper against known detection-heavy pages (Cloudflare, Google reCAPTCHA v3 score endpoints) and monitor success/challenge rates.
 4. **Unit tests** (not yet implemented): mock `InputClient._client.send_raw` and assert that for a given `mouseMoved` target, the emitted waypoint count, sleep durations, and final position match expectations within statistical bounds.
+5. **Pre-typing sequence test** (not yet implemented): invoke a patched typing path with a known element node, capture all CDP events emitted, and assert: (a) a `mouseMoved` event sequence precedes the first `keyDown`, (b) a `mousePressed` / `mouseReleased` pair follows the move, (c) the gap between `mouseReleased` and the first `keyDown` is within `[_PRE_TYPE_POST_CLICK_MIN_S, _PRE_TYPE_POST_CLICK_MAX_S]`.

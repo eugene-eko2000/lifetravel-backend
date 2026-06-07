@@ -93,8 +93,8 @@ _HOVER_STEPS_MAX  = 4       # most  micro-hover movements before mousedown
 _HOVER_SIGMA      = 1.5     # std-dev of each hover micro-offset (pixels)
 _HOVER_STEP_MIN_S = 0.012   # min delay between hover micro-steps
 _HOVER_STEP_MAX_S = 0.030   # max delay between hover micro-steps
-_DWELL_MIN_S      = 0.20    # min pause between cursor stop and mousedown
-_DWELL_MAX_S      = 0.50    # max pause between cursor stop and mousedown
+_DWELL_MIN_S      = 0.35    # min pause between cursor stop and mousedown
+_DWELL_MAX_S      = 0.65    # max pause between cursor stop and mousedown
 
 # ── Click position offset ─────────────────────────────────────────────────────
 _CLICK_SIGMA_FRAC        = 0.33  # σ as a fraction of element dimension
