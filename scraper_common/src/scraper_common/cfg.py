@@ -43,6 +43,8 @@ class Cfg:
     captcha_solver: str
     captcha_solver_api_key: str   # 2captcha / anti-captcha API key
     captcha_solver_service: str   # "2captcha" or "anticaptcha"
+    # Logging level: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+    log_level: str
 
     @classmethod
     def from_env(cls, default_port: int = 8080) -> "Cfg":
@@ -69,4 +71,5 @@ class Cfg:
             captcha_solver=os.getenv("CAPTCHA_SOLVER", "none").lower().strip(),
             captcha_solver_api_key=os.getenv("CAPTCHA_SOLVER_API_KEY", ""),
             captcha_solver_service=os.getenv("CAPTCHA_SOLVER_SERVICE", "2captcha").lower().strip(),
+            log_level=os.getenv("LOG_LEVEL", "INFO").upper().strip(),
         )

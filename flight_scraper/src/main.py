@@ -37,10 +37,10 @@ async def search(request: FlightSearchInput) -> FlightSearchResponse:
 
 
 if __name__ == "__main__":
+    cfg = Cfg.from_env(default_port=8081)
     logging.basicConfig(
-        level=logging.INFO,
+        level=cfg.log_level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-    cfg = Cfg.from_env(default_port=8081)
     logger.info("Starting Flight Scraper service on port %d", cfg.port)
     uvicorn.run(app, host="0.0.0.0", port=cfg.port)

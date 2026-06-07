@@ -29,12 +29,12 @@ REQUEST = FlightSearchInput(
     adults=1,
     children=0,
     cabin_class="economy",
-    site="https://swiss.com",
+    # site="https://swiss.com",
     # site="https://easyjet.com",
     # site="https://ryanair.com",
     # site="https://airfrance.com",
     # site="https://lufthansa.com",
-    # site="https://skyscanner.com",
+    site="https://skyscanner.com",
     # site="https://flights.google.com",
     # Bot detections tests
     # site="https://bot.sannysoft.com/"
