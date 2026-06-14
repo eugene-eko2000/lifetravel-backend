@@ -43,6 +43,7 @@ async def search_flights(search_input: FlightSearchInput) -> FlightSearchRespons
         system_prompt_extension=FLIGHT_SYSTEM_PROMPT_EXTENSION,
         output_model_schema=ScrapedFlights,
         logger_name="flight_scraper.scraper",
+        trace_file=cfg.trace_file or None,
     )
 
     if raw is None:

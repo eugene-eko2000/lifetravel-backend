@@ -43,6 +43,7 @@ async def search_hotels(search_input: HotelSearchInput) -> HotelSearchResponse:
         system_prompt_extension=HOTEL_SYSTEM_PROMPT_EXTENSION,
         output_model_schema=ScrapedHotels,
         logger_name="hotel_scraper.scraper",
+        trace_file=cfg.trace_file or None,
     )
 
     if raw is None:

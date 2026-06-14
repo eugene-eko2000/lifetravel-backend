@@ -23,8 +23,8 @@ logging.basicConfig(
 REQUEST = FlightSearchInput(
     origin="Zurich",
     destination="New York",
-    departure_date="2026-06-15",
-    return_date="2026-06-22",
+    departure_date="2026-06-23",
+    return_date="2026-06-30",
     # days_range=2,
     adults=1,
     children=0,

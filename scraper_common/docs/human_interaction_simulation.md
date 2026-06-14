@@ -129,48 +129,46 @@ After hover/dwell, the actual `mousedown` coordinates are **not** the element ce
 
 #### Motivation
 
-Real users aim loosely at a button and click somewhere inside it; they almost never land on the geometric centre. Behavioural classifiers (DataDome, PerimeterX) flag repeated centre-clicks as synthetic. The model must produce a wide, natural-looking spread across the whole element surface.
+Real users aim loosely at a button and click somewhere inside it; they almost never land on the geometric centre. Behavioural classifiers (DataDome, PerimeterX) flag repeated centre-clicks as synthetic. The model must produce a flat, uniform spread across the entire element surface — every interior point is equally likely, just as a human carelessly tapping anywhere inside the target would produce.
+
+This same rule applies to the pre-typing focus click: when the mouse is moved and clicked to focus an input field before keystrokes begin, the click lands at a uniformly-sampled position inside the input's bounding box, not at its centre.
 
 #### Algorithm — with bounding box
 
 When a trusted bounding box is available (`_BOUNDS_MIN_PX=8` ≤ width/height ≤ `_BOUNDS_MAX_PX=400`):
 
-1. **Mean** — the geometric centre of the element, computed from the bounding box:
-   ```
-   mean_x = bx + bw / 2
-   mean_y = by + bh / 2
-   ```
-   This is independent of the requested target point (which may already be the centre, or may be an arbitrary point inside the element — we discard it in favour of a box-derived anchor).
-
-2. **Standard deviation** — proportional to the element dimensions with a generous scale factor so the distribution genuinely fills the element:
-   ```
-   σ_x = bw × _CLICK_SIGMA_FRAC     (e.g. bw/3)
-   σ_y = bh × _CLICK_SIGMA_FRAC
-   ```
-   No small upper cap: on a 200 px wide card `σ_x ≈ 67 px`, giving clicks spread from left to right third naturally. A floor of `_CLICK_SIGMA_MIN_PX = 3 px` prevents near-zero σ on hairline elements.
-
-3. **Sample**:
-   ```
-   cx = gauss(mean_x, σ_x)
-   cy = gauss(mean_y, σ_y)
-   ```
-
-4. **Clamp** to an inset box to avoid clicking on borders/padding:
+1. **Inset the box** — shrink by a small margin to avoid clicking on the element's border or padding:
    ```
    margin_x = max(_CLICK_MARGIN_MIN_PX, bw × _CLICK_MARGIN_FRAC)
    margin_y = max(_CLICK_MARGIN_MIN_PX, bh × _CLICK_MARGIN_FRAC)
-   cx = clamp(cx, bx + margin_x, bx + bw - margin_x)
-   cy = clamp(cy, by + margin_y, by + bh - margin_y)
+
+   x_min = bx + margin_x
+   x_max = bx + bw - margin_x
+   y_min = by + margin_y
+   y_max = by + bh - margin_y
    ```
 
+2. **Sample uniformly** inside the inset box:
+   ```
+   cx = U(x_min, x_max)
+   cy = U(y_min, y_max)
+   ```
+
+   The requested target point is discarded; the position is drawn solely from the element's geometry. Every point within the inset rectangle is equally likely — no density pile-up at the centre or near the edges.
+
 **Example** — 120 × 40 px button:
-- σ_x = 40 px, σ_y = 13 px; margin_x = 4 px, margin_y = 2 px.
-- ≈ 68 % of clicks land within ±40 px of centre horizontally, ±13 px vertically.
-- Tails beyond the element edge are folded back by the clamp, producing a slight density pile-up near the edges — matching real-world click heatmaps on buttons.
+- margin_x = max(2, 6) = 6 px; margin_y = max(2, 2) = 2 px.
+- `cx ∈ U(bx+6, bx+114)`, `cy ∈ U(by+2, by+38)`.
+- Clicks are evenly distributed across the full face of the button.
 
 **Example** — 20 × 20 px checkbox:
-- σ_x = σ_y = 6.7 px; margin = 1 px.
-- Clicks scatter naturally across the full face of the checkbox.
+- margin_x = margin_y = 2 px.
+- `cx ∈ U(bx+2, bx+18)`, `cy ∈ U(by+2, by+18)`.
+- All 16×16 interior pixels are equally reachable.
+
+**Example** — input field focused before typing, 240 × 36 px:
+- margin_x = max(2, 12) = 12 px; margin_y = max(2, 1.8) = 2 px.
+- Mouse clicks at any `(U(bx+12, bx+228), U(by+2, by+34))` — spread naturally across the text-entry area.
 
 #### Algorithm — without bounding box
 
@@ -182,15 +180,13 @@ The chosen `(click_x, click_y)` is stored in `_mouse_x, _mouse_y` so the subsequ
 
 #### Parameters
 
-| Symbol | Proposed value | Meaning |
+| Symbol | Value | Meaning |
 |---|---|---|
-| `_CLICK_SIGMA_FRAC` | 0.33 | σ as a fraction of element dimension |
-| `_CLICK_SIGMA_MIN_PX` | 3.0 px | Floor on σ for tiny elements |
-| `_CLICK_MARGIN_FRAC` | 0.05 | Inset margin as fraction of dimension |
+| `_CLICK_MARGIN_FRAC` | 0.05 | Inset margin as fraction of element dimension |
 | `_CLICK_MARGIN_MIN_PX` | 2.0 px | Absolute inset floor |
-| `_CLICK_FALLBACK_SIGMA_PX` | 4.0 px | Fallback offset when no bounding box |
+| `_CLICK_FALLBACK_SIGMA_PX` | 4.0 px | Fallback Gaussian offset when no bounding box |
 
-> **Change from previous design**: the old algorithm used σ = `clamp(dim/4, 1, 10)` — a hard 10 px cap that made clicks cluster tightly near centre regardless of element size. The new design removes the cap and anchors the mean on the box centre rather than the requested target point.
+> **Change from previous design**: the previous algorithm sampled from a Gaussian centred on the element's geometric centre (σ = bw/3, clamped to the element bounds). The new design replaces this with a uniform distribution over the inset bounding box. This eliminates the centre-biased density concentration and ensures every interior point is equally likely — a more accurate model of real human click spread.
 
 ---
 
@@ -415,7 +411,7 @@ When a human types into a web form they first move the mouse to the input field,
    Dispatch `mousePressed` then `mouseReleased` at the element centre. The existing mouse patch automatically executes:
    - Hover micro-moves (2–4 steps, §2.3) — may be skipped if the cursor arrived inside the element at step 2
    - Dwell pause `U(200, 500) ms` (§2.3)
-   - Click position Gaussian offset (§2.4)
+   - Click position uniform offset (§2.4)
    - Click hold `U(50, 150) ms` + lift-off drift (§2.5)
 
 4. **Post-focus dwell**  
@@ -612,7 +608,7 @@ DefaultActionWatchdog
   │   2. dispatchMouseEvent(mouseMoved, elem_centre)  ──────────────────────►──┤
   │        → Bézier path, ease-in-out-sine, hover suppress if on-target        │
   │   3. dispatchMouseEvent(mousePressed, elem_centre) ─────────────────────►──┤
-  │        → hover micro-moves (or skip) → dwell → Gaussian click offset       │
+  │        → hover micro-moves (or skip) → dwell → uniform click offset       │
   │   4. dispatchMouseEvent(mouseReleased, click_pos) ──────────────────────►──┤
   │        → hold 50–150 ms → release → lift-off drift                        │
   │   5. asyncio.sleep U(100, 300 ms)  [post-focus dwell]                     │

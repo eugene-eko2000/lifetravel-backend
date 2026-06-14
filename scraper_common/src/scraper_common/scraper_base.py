@@ -22,10 +22,14 @@ from scraper_common.captcha_solver import CaptchaSolver
 from scraper_common.human_typing import patch_watchdog_typing
 from scraper_common.human_mouse import patch_mouse_movement
 from scraper_common.human_scrolling import patch_scroll_page
+from scraper_common.model_tracer import ModelTracer
 
 # Apply human-like interaction patches before any Agent is instantiated.
-patch_watchdog_typing()
+# mouse MUST be patched first — the typing patch calls dispatchMouseEvent for
+# the pre-typing focus sequence, so the Bézier/hover/dwell logic must already
+# be in place when patch_watchdog_typing() runs (§4 of design doc).
 patch_mouse_movement()
+patch_watchdog_typing()
 patch_scroll_page()
 
 def _system_browser_executable(channel: str | None) -> str | None:
@@ -115,6 +119,19 @@ def _build_llm(cfg: "Cfg") -> BaseChatModel:
         if not cfg.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=google")
         return ChatGoogle(model=cfg.gemini_model, api_key=cfg.gemini_api_key, temperature=0)
+    if provider == "deepseek":
+        from browser_use.llm import ChatDeepSeek
+        if not cfg.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek")
+        return ChatDeepSeek(model=cfg.deepseek_model, api_key=cfg.deepseek_api_key, temperature=0)
+    if provider == "browseruse":
+        from browser_use.llm import ChatBrowserUse
+        if not cfg.browseruse_api_key:
+            raise ValueError("BROWSERUSE_API_KEY is required when LLM_PROVIDER=browseruse")
+        kwargs = dict(api_key=cfg.browseruse_api_key, temperature=0)
+        if cfg.browseruse_model:
+            kwargs["model"] = cfg.browseruse_model
+        return ChatBrowserUse(**kwargs)
     if provider != "anthropic":
         logging.getLogger(__name__).warning(
             "Unknown LLM_PROVIDER %r — falling back to anthropic", provider
@@ -143,6 +160,7 @@ async def run_browser_agent(
     system_prompt_extension: str,
     output_model_schema: Any,
     logger_name: str = "scraper_common.scraper_base",
+    trace_file: str | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Run a browser-use agent with stealth patches and cycle detection.
@@ -155,6 +173,9 @@ async def run_browser_agent(
     captcha_solver = CaptchaSolver.from_cfg(cfg)
 
     llm = _build_llm(cfg)
+
+    effective_trace_file = trace_file or cfg.trace_file or None
+    tracer = ModelTracer(effective_trace_file) if effective_trace_file else None
 
     # Per-run tracking state for cycle detection
     url_visit_counts: Counter[str] = Counter()
@@ -223,6 +244,9 @@ async def run_browser_agent(
                 stop_reason.append(
                     f"Action cycle detected: {action_sequence[-cfg.action_repeat_threshold * 2:]}"
                 )
+
+        if tracer is not None and agent_output is not None:
+            tracer.record(browser_state, agent_output, step_number)
 
         logger.debug(
             "Step %d | url=%s | actions=%s",
@@ -323,14 +347,14 @@ async def run_browser_agent(
                 headless=cfg.headless,
                 channel=cfg.browser_channel,
                 executable_path=_system_browser_executable(cfg.browser_channel),
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    # Cookies enabled — disable Chrome 136+ Tracking Protection
-                    # (which blocks third-party cookies by default) and storage
-                    # partitioning, so auth flows, embedded widgets and any
-                    # cross-origin cookie handshake work as they did pre-2025.
-                    "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
-                ],
+                # args=[
+                #     "--disable-blink-features=AutomationControlled",
+                #     # Cookies enabled — disable Chrome 136+ Tracking Protection
+                #     # (which blocks third-party cookies by default) and storage
+                #     # partitioning, so auth flows, embedded widgets and any
+                #     # cross-origin cookie handshake work as they did pre-2025.
+                #     "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
+                # ],
                 ignore_default_args=["--enable-automation"],
                 user_agent=_USER_AGENT,
                 # user_data_dir=cfg.user_data_dir or None,
@@ -368,6 +392,8 @@ async def run_browser_agent(
             logger.exception("Browser agent raised an exception")
             return None, str(exc)
         finally:
+            if tracer is not None:
+                tracer.close()
             # Only stop browsers we launched ourselves — leave externally-attached
             # ones running for the next call / for the operator to inspect.
             if owned_browser:

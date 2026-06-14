@@ -97,11 +97,9 @@ _DWELL_MIN_S      = 0.35    # min pause between cursor stop and mousedown
 _DWELL_MAX_S      = 0.65    # max pause between cursor stop and mousedown
 
 # ── Click position offset ─────────────────────────────────────────────────────
-_CLICK_SIGMA_FRAC        = 0.33  # σ as a fraction of element dimension
-_CLICK_SIGMA_MIN_PX      = 3.0   # floor on σ for tiny elements
 _CLICK_MARGIN_FRAC       = 0.05  # inset margin as fraction of element dimension
 _CLICK_MARGIN_MIN_PX     = 2.0   # absolute inset floor
-_CLICK_FALLBACK_SIGMA_PX = 4.0   # fallback σ when no bounding box
+_CLICK_FALLBACK_SIGMA_PX = 4.0   # fallback Gaussian offset when no bounding box
 
 # ── Button hold (mousedown → mouseup) ─────────────────────────────────────────
 _CLICK_HOLD_MIN_S = 0.050   # min time the button stays pressed (default range)
@@ -441,7 +439,6 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
         global _mouse_x, _mouse_y
 
         event_type = params.get("type", "")
-        print(f"dispatchMouseEvent: {event_type}")
 
         # ── mouseMoved → Bézier curved path ──────────────────────────────────
         if event_type == "mouseMoved":
@@ -565,9 +562,9 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             await asyncio.sleep(random.uniform(_DWELL_MIN_S, _DWELL_MAX_S))
 
             # Pick the actual click coordinates. When we have a trustworthy
-            # bounding box we spread the click anywhere inside the element
-            # (Gaussian centred on the requested target, clipped to an inset
-            # of the box). Otherwise fall back to a small Gaussian offset.
+            # bounding box we sample uniformly inside the inset box so every
+            # interior point is equally likely (no centre-biased density).
+            # Otherwise fall back to a small Gaussian offset from the target.
             click_x = click_y = 0
             click_strategy = "center"
             if (
@@ -578,14 +575,8 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 bx, by, bw, bh = bounds
                 margin_x = max(_CLICK_MARGIN_MIN_PX, bw * _CLICK_MARGIN_FRAC)
                 margin_y = max(_CLICK_MARGIN_MIN_PX, bh * _CLICK_MARGIN_FRAC)
-                sigma_x = max(_CLICK_SIGMA_MIN_PX, bw * _CLICK_SIGMA_FRAC)
-                sigma_y = max(_CLICK_SIGMA_MIN_PX, bh * _CLICK_SIGMA_FRAC)
-                cx = random.gauss(bx + bw / 2, sigma_x)
-                cy = random.gauss(by + bh / 2, sigma_y)
-                cx = max(bx + margin_x, min(bx + bw - margin_x, cx))
-                cy = max(by + margin_y, min(by + bh - margin_y, cy))
-                click_x = round(cx)
-                click_y = round(cy)
+                click_x = round(random.uniform(bx + margin_x, bx + bw - margin_x))
+                click_y = round(random.uniform(by + margin_y, by + bh - margin_y))
                 click_strategy = f"box({bw:.0f}x{bh:.0f})"
             else:
                 click_x = round(target_x + random.gauss(0.0, _CLICK_FALLBACK_SIGMA_PX))
@@ -649,10 +640,10 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
     logger.info(
         "Human mouse-interaction patches applied "
         "(hover %d–%d steps, dwell %.0f–%.0fms, hold %.0f–%.0fms, "
-        "click-offset σ=%.0f%%×dim/floor %.0fpx, viz=%s)",
+        "click-offset=uniform-inset margin=%.0f%%/floor %.0fpx, viz=%s)",
         _HOVER_STEPS_MIN, _HOVER_STEPS_MAX,
         _DWELL_MIN_S * 1000, _DWELL_MAX_S * 1000,
         _CLICK_HOLD_MIN_S * 1000, _CLICK_HOLD_MAX_S * 1000,
-        _CLICK_SIGMA_FRAC * 100, _CLICK_SIGMA_MIN_PX,
+        _CLICK_MARGIN_FRAC * 100, _CLICK_MARGIN_MIN_PX,
         "on" if _VIZ_ENABLED else "off",
     )
