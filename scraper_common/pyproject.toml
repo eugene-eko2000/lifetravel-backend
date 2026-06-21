@@ -11,7 +11,7 @@ dependencies = [
   "browser-use==0.13.1",
   "playwright-stealth==2.0.3",
   "httpx>=0.27",
-  "openai>=2.43.0",
+  "openai>=2.43",
   "camoufox>=0.4.11",
 ]
 
