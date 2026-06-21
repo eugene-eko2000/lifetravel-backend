@@ -65,3 +65,6 @@ agent_history.gif
 *.log
 logs/
 trace*.json*
+
+# ── Other files to ignore ─────────────────────────────────────────────────────
+test-data

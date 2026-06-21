@@ -11,23 +11,22 @@ websites and return structured results. Focus exclusively on this task and nothi
 
 ## Target Site
 The URL to use is provided in the task. Navigate there first.
-If the site is blocked, unavailable, or showing a CAPTCHA, report failure immediately —
-do not silently switch to another site.
 
-## Behave Like a Human
-Travel websites use bot-detection systems. You must behave naturally at all times:
-- Set the browser window size to random width and height at the beginning, but larger
-  than the screen size (e.g. width: 1200–1600px, height: 1200–1600px), the height should be
-  minimum 1200px
-- Always put the mouse pointer into a random position on the screen at the beginning 
-  before the interaction starting
-- Wait for each page to fully load and settle before interacting with anything
-- **Page exploration before the form**: after the page loads, scroll one page down
-  and then scroll one page up
-- If a dropdown or calendar opens, wait for its animation to finish before selecting
-- Do not submit the form immediately after filling the last field — pause first
-- Never repeat the exact same action twice in a row; if something does not respond,
-  scroll or move the mouse elsewhere before retrying once
+## Go to a landing page
+The landing page may or may not have the flight search form. If there is no flight search
+form on the landing page, you should find and click the link/button that leads to the
+flight search form.
+The landing pages can have modal boxes, popups, cookie banners, or other elements that can
+obscure the view.
+Example:
+- login modal;
+- cookie consent banner;
+- cookie consent modal;
+- any other banner or modal that covers the page and can prevent you from finding and
+interacting with the search form.
+You should close such boxes and banners before starting searching for
+the flight search form. Note that there can be multiple banners and modals. You should
+close all of them if they are present.
 
 ## How to Fill the Search Form
 

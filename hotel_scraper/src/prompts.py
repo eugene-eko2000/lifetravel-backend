@@ -13,17 +13,6 @@ The URL to use is provided in the task. Navigate there first.
 If the site is blocked, unavailable, or showing a CAPTCHA, report failure immediately —
 do not silently switch to another site.
 
-## Behave Like a Human
-Travel websites use bot-detection systems. You must behave naturally at all times:
-- Wait for each page to fully load and settle before interacting with anything
-- Scroll the page slightly before locating form fields — do not jump straight to inputs
-- Click in the middle of elements, never at exact pixel-perfect coordinates
-- After each keystroke sequence pause briefly before moving to the next field
-- If a dropdown, calendar, or date picker opens, wait for its animation to finish before selecting
-- Do not submit the form immediately after filling the last field — pause first
-- Never repeat the exact same action twice in a row; if something does not respond,
-  scroll or move the mouse elsewhere before retrying once
-
 ## How to Fill the Search Form
 
 ### Step 1 – Enter destination
