@@ -67,4 +67,4 @@ logs/
 trace*.json*
 
 # ── Other files to ignore ─────────────────────────────────────────────────────
-test-data
+scraper_common/data/

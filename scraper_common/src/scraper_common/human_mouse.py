@@ -2,7 +2,7 @@
 Patches cdp_use's InputClient.dispatchMouseEvent so every mouse interaction
 mirrors how a human physically uses a mouse:
 
-  mouseMoved    → replaced with a Bézier curved path (slow→fast→slow)
+  mouseMoved    → replaced with a recorded human path from HumanInteractions
   mousePressed  → preceded by micro-hover tremor + dwell pause; click coords
                   are slightly offset from the exact element centre
   mouseReleased → 50–150 ms hold, then release; followed by lift-off drift
@@ -11,7 +11,7 @@ mirrors how a human physically uses a mouse:
 How it works
 ------------
 browser_use dispatches element clicks as:
-  1. mouseMoved   → teleports cursor to target  (replaced with Bézier path)
+  1. mouseMoved   → teleports cursor to target  (replaced with recorded path)
   2. mousePressed at target                     (prefixed with hover + dwell)
   3. mouseReleased at target                    (suffixed with lift-off drift)
 
@@ -21,9 +21,8 @@ no code duplication.  Idempotent: safe to call multiple times.
 
 Interaction model
 -----------------
-  Bézier path    – cubic curve, random perp-offset control points → natural arc
-  Ease-in-out    – inverse ease-in-out-sine timing per waypoint → slow→fast→slow
-  Hand tremor    – Gaussian micro-jitter on intermediate waypoints
+  Recorded path  – nearest matching sample from recorded human sessions,
+                   transformed (rotate + scale) to fit the requested move
   Pre-click hover– 2–4 tiny random moves simulating the hand settling on target;
                    skipped entirely when the cursor is already inside the target
                    element's bounding box (post-modal-close, accordion expand, …)
@@ -55,37 +54,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Optional
 
+from scraper_common.human_interactions import interactions as _interactions
+
 logger = logging.getLogger("scraper_common.human_mouse")
 
 # ── Global cursor position ────────────────────────────────────────────────────
 _mouse_x: float = 100.0
 _mouse_y: float = 100.0
-
-# ── Bézier movement tuning ────────────────────────────────────────────────────
-_TIME_BASE_S      = 0.10    # minimum path duration even for tiny moves
-_TIME_PER_PX      = 0.00035 # +0.35 ms per pixel of travel
-_TIME_JITTER      = 0.10    # ±10 % speed variation
-_TIME_MAX_S       = 0.55    # cap so very long moves don't feel laggy
-_MIN_STEP_SLEEP_S = 0.004   # 4 ms floor per waypoint step
-_STEP_JITTER      = 0.15    # ±15 % random fluctuation on each step's sleep time
-_TREMOR_SIGMA     = 1.0     # std-dev of Gaussian jitter on intermediate points (~95% within ±2 px)
-_TREMOR_CLAMP     = 2.0     # hard cap on per-axis jitter magnitude (pixels)
-
-# Curve radius is sampled from one of three categories so successive moves
-# visibly differ in arc shape — tight darts, normal arcs, and wide loopy ones.
-# (probability, bulge_min_frac, bulge_max_frac)
-_BULGE_CATEGORIES = (
-    (0.30, 0.06, 0.13),   # tight    — short, near-direct moves
-    (0.45, 0.13, 0.25),   # medium   — typical reach
-    (0.25, 0.25, 0.45),   # wide     — loose, swinging path
-)
-_BULGE_FLOOR_PX   = 6.0   # absolute minimum bulge in pixels for short hops
-
-# Asymmetric easing: peak velocity is shifted earlier in time, giving a
-# longer, gradual deceleration phase before the click — matches measured
-# ballistic-then-corrective human reach profiles.
-_DECEL_SKEW_MIN   = 0.36
-_DECEL_SKEW_MAX   = 0.46  # 0.50 would be symmetric ease-in-out-sine
 
 # ── Pre-click hover tuning ────────────────────────────────────────────────────
 _HOVER_STEPS_MIN  = 2       # fewest micro-hover movements before mousedown
@@ -313,96 +288,6 @@ def _move_params(x: int, y: int, buttons: int = 0) -> dict:
 
 
 
-# ── Math helpers ──────────────────────────────────────────────────────────────
-
-def _ease_inv(p: float, skew: float = 0.5) -> float:
-    """
-    Inverse easing — maps normalised spatial position p ∈ [0,1] to normalised
-    elapsed time t ∈ [0,1]. Used to compute per-step time budget for
-    equally-spaced spatial waypoints, producing the slow→fast→slow profile.
-
-      skew = 0.5  → symmetric ease-in-out-sine (acceleration mirrors deceleration)
-      skew < 0.5  → peak velocity shifted earlier in time → quicker acceleration,
-                    longer/gentler deceleration toward the click target.
-
-    Real human mouse moves measured in HCI studies show a peak ~30–45 % into
-    the trajectory rather than dead centre, so we draw skew randomly per move.
-    """
-    p = max(0.0, min(1.0, p))
-    base = math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * p))) / math.pi
-    # Symmetric sine-shaped distortion that preserves the [0,1] endpoints —
-    # nudges the curve below `base` when skew<0.5, so a given spatial midpoint
-    # is reached earlier in time → first half fast, second half slow.
-    bias = (0.5 - skew) * math.sin(math.pi * base) * 0.4
-    return max(0.0, min(1.0, base - bias))
-
-
-def _sample_bulge_fraction() -> tuple[float, float]:
-    """
-    Pick a (min, max) bulge-fraction range from the categorical distribution
-    in _BULGE_CATEGORIES. Returns the bracket the actual sample is drawn from
-    so callers can also report the chosen category.
-    """
-    r = random.random()
-    cum = 0.0
-    for prob, bmin, bmax in _BULGE_CATEGORIES:
-        cum += prob
-        if r <= cum:
-            return bmin, bmax
-    bmin, bmax = _BULGE_CATEGORIES[-1][1], _BULGE_CATEGORIES[-1][2]
-    return bmin, bmax
-
-
-def _bezier_cubic(p0: tuple, p1: tuple, p2: tuple, p3: tuple, t: float) -> tuple:
-    mt = 1.0 - t
-    x = mt**3*p0[0] + 3*mt**2*t*p1[0] + 3*mt*t**2*p2[0] + t**3*p3[0]
-    y = mt**3*p0[1] + 3*mt**2*t*p1[1] + 3*mt*t**2*p2[1] + t**3*p3[1]
-    return x, y
-
-
-def _build_path(sx: float, sy: float, ex: float, ey: float) -> list[tuple[int, int]]:
-    """
-    Return integer (x, y) waypoints forming a curved path from (sx,sy) to
-    (ex,ey) via a cubic Bézier with randomly offset control points.
-    """
-    dx, dy = ex - sx, ey - sy
-    distance = math.hypot(dx, dy)
-    if distance < 1.0:
-        return [(round(ex), round(ey))]
-
-    n = max(10, min(50, int(distance / 12)))
-    px, py = (-dy / distance, dx / distance)   # unit perpendicular
-    bmin, bmax = _sample_bulge_fraction()
-    bulge = max(_BULGE_FLOOR_PX, distance * random.uniform(bmin, bmax))
-
-    # Independent sides per control point — same side gives a single arc,
-    # opposite sides produce a gentle S-curve. Both are observed in real humans.
-    side1 = random.choice((-1.0, 1.0))
-    side2 = side1 if random.random() < 0.7 else -side1
-
-    cp1 = (
-        sx + dx * random.uniform(0.20, 0.40) + px * side1 * bulge * random.uniform(0.5, 1.0),
-        sy + dy * random.uniform(0.20, 0.40) + py * side1 * bulge * random.uniform(0.5, 1.0),
-    )
-    cp2 = (
-        sx + dx * random.uniform(0.60, 0.80) + px * side2 * bulge * random.uniform(0.5, 1.0),
-        sy + dy * random.uniform(0.60, 0.80) + py * side2 * bulge * random.uniform(0.5, 1.0),
-    )
-
-    points: list[tuple[int, int]] = []
-    for i in range(1, n + 1):
-        t = i / n
-        x, y = _bezier_cubic((sx, sy), cp1, cp2, (ex, ey), t)
-        if i < n:                           # jitter on intermediate points only
-            jx = max(-_TREMOR_CLAMP, min(_TREMOR_CLAMP, random.gauss(0.0, _TREMOR_SIGMA)))
-            jy = max(-_TREMOR_CLAMP, min(_TREMOR_CLAMP, random.gauss(0.0, _TREMOR_SIGMA)))
-            x += jx
-            y += jy
-        points.append((round(x), round(y)))
-
-    return points
-
-
 # ── Patch entry point ─────────────────────────────────────────────────────────
 
 def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
@@ -440,7 +325,7 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
 
         event_type = params.get("type", "")
 
-        # ── mouseMoved → Bézier curved path ──────────────────────────────────
+        # ── mouseMoved → recorded human path ─────────────────────────────────
         if event_type == "mouseMoved":
             target_x = float(params.get("x", _mouse_x))
             target_y = float(params.get("y", _mouse_y))
@@ -470,45 +355,29 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                         "target element (%.0f,%.0f %.0fx%.0f)",
                         _mouse_x, _mouse_y, bounds[0], bounds[1], bounds[2], bounds[3],
                     )
-                    # No-op dispatch so the CDP layer still sees an event;
-                    # the cursor literally doesn't travel anywhere.
                     return await self._client.send_raw(
                         method="Input.dispatchMouseEvent",
                         params=_move_params(round(_mouse_x), round(_mouse_y)),
                         session_id=session_id,
                     )
 
-            total_time = _TIME_BASE_S + distance * _TIME_PER_PX
-            total_time = min(
-                _TIME_MAX_S,
-                total_time * random.uniform(1.0 - _TIME_JITTER, 1.0 + _TIME_JITTER),
-            )
-            path = _build_path(_mouse_x, _mouse_y, target_x, target_y)
-            n = len(path)
-
-            # Per-move asymmetric ease — peak velocity reached at ~36-46%
-            # through the path, leaving a longer deceleration phase.
-            skew = random.uniform(_DECEL_SKEW_MIN, _DECEL_SKEW_MAX)
+            path = _interactions.generate_mousemove(_mouse_x, _mouse_y, target_x, target_y)
 
             logger.debug(
-                "Mouse path (%.0f,%.0f)→(%.0f,%.0f) dist=%.0f steps=%d time=%.2fs skew=%.2f",
-                _mouse_x, _mouse_y, target_x, target_y, distance, n, total_time, skew,
+                "Mouse path (%.0f,%.0f)→(%.0f,%.0f) dist=%.0f steps=%d",
+                _mouse_x, _mouse_y, target_x, target_y, distance, len(path),
             )
 
             result: dict = {}
-            for i, (wx, wy) in enumerate(path):
-                t0 = _ease_inv(i / n, skew)
-                t1 = _ease_inv((i + 1) / n, skew)
-                step_time = max(_MIN_STEP_SLEEP_S, (t1 - t0) * total_time)
-                # Add per-step fluctuation so cruise speed isn't perfectly constant.
-                step_time *= random.uniform(1.0 - _STEP_JITTER, 1.0 + _STEP_JITTER)
+            for step in path:
                 result = await self._client.send_raw(
                     method="Input.dispatchMouseEvent",
-                    params=_move_params(wx, wy),
+                    params=_move_params(step.x, step.y),
                     session_id=session_id,
                 )
-                _emit_viz(self._client, session_id, wx, wy, "move")
-                await asyncio.sleep(step_time)
+                _emit_viz(self._client, session_id, step.x, step.y, "move")
+                if step.delay_ms > 0:
+                    await asyncio.sleep(step.delay_ms / 1000.0)
 
             _mouse_x, _mouse_y = target_x, target_y
             return result
