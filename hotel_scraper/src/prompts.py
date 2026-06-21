@@ -1,5 +1,3 @@
-from models import HotelSearchInput
-
 # ─── System prompt extension ──────────────────────────────────────────────────
 # Appended to browser_use's default system prompt via extend_system_message.
 
@@ -56,9 +54,41 @@ the view. Examples:
 ### Step 7 – Apply star filter (only if min_stars is set in the task)
 - Look for a star rating filter on the results page
 - Select the minimum star rating specified in the task
+- Wait for the results to refresh before proceeding
+
+### Step 8 – Apply review score filter (only if min_review_score is set in the task)
+- Look for a review score / guest rating filter on the results page
+- Select the threshold that matches or is closest to the value in the task
+- Wait for the results to refresh before proceeding
+
+### Step 9 – Apply accommodation type filter (only if accommodation_types is set in the task)
+- Look for a property type / accommodation type filter on the results page
+- Select only the types listed in the task (e.g. "Hotels", "Apartments", "Hostels")
+- Wait for the results to refresh before proceeding
+
+### Step 10 – Apply amenity filters (only if amenities are set in the task)
+- Look for a facilities / amenities filter panel on the results page
+- Enable each amenity listed in the task (e.g. "Parking", "Air conditioning", "Swimming pool")
+- Wait for the results to refresh after applying all amenity filters
+
+### Step 11 – Apply price filter (only if min_price_per_night or max_price_per_night is set in the task)
+- Look for a price range / budget slider or input on the results page
+- Set the lower bound if min_price_per_night is provided
+- Set the upper bound if max_price_per_night is provided
 - Wait for the results to refresh before extracting data
 
+## Filters applying
+
+Check the kind of filter settings. If it's a checkbox, check its status, then click it just once,
+then check its status. Don't click multiple times.
+
+If the page content changes after filter settings click, consider it intended, don't
+try to re-click.
+
+Some settings can be a gauge e.g. min / max price. Consider interacting with it.
+
 ## Data Extraction
+
 From each visible hotel card, collect:
 - Hotel name
 - Address or location description (if visible)
@@ -92,43 +122,11 @@ complete JSON result. Do not continue browsing after extraction is complete.
 
 # ─── Task prompt builder ──────────────────────────────────────────────────────
 
-_DEFAULT_SITE = "https://www.booking.com"
-
-
-def build_task_prompt(search: HotelSearchInput) -> str:
-    nights = _count_nights(search.check_in, search.check_out)
-    nights_label = f"{nights} night(s)" if nights else "unknown nights"
-
+def build_task_prompt(site: str, search: str) -> str:
     lines = [
-        f"Navigate to: {search.site or _DEFAULT_SITE}",
+        f"site: {site}"
         "",
-        "Search for hotels with these exact parameters:",
-        "",
-        f"  Destination:  {search.destination}",
-        f"  Check-in:     {search.check_in}",
-        f"  Check-out:    {search.check_out}",
-        f"  Stay:         {nights_label}",
-        f"  Guests:       {search.guests} adult(s)",
-        f"  Rooms:        {search.rooms}",
+        search
     ]
-    if search.min_stars is not None:
-        lines.append(f"  Min stars:    {search.min_stars}+")
-
-    lines += [
-        "",
-        "Return ALL available hotel offers you find, including hotel name, address,",
-        "star rating, review score, room type, price per night, total price, currency,",
-        "breakfast inclusion, and cancellation policy.",
-        "The result must be valid JSON matching the required output schema.",
-    ]
+    
     return "\n".join(lines)
-
-
-def _count_nights(check_in: str, check_out: str) -> int | None:
-    try:
-        from datetime import date
-        ci = date.fromisoformat(check_in)
-        co = date.fromisoformat(check_out)
-        return (co - ci).days
-    except Exception:
-        return None

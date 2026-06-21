@@ -13,7 +13,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scraper_common" / "src"))
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from models import HotelSearchInput
 from scraper import search_hotels
 
 logging.basicConfig(
@@ -24,25 +23,28 @@ logging.basicConfig(
 CHECKIN_DATE = (datetime.now() + timedelta(days=30)).date().isoformat()
 CHECKOUT_DATE = (datetime.now() + timedelta(days=37)).date().isoformat()
 
-REQUEST = HotelSearchInput(
-    destination="Paris",
-    check_in=CHECKIN_DATE,
-    check_out=CHECKOUT_DATE,
-    guests=2,
-    rooms=1,
-    min_stars=4,
-    # site="https://www.hotels.com",  # uncomment to test a different site
-    site="https://www.booking.com",  # uncomment to test a different site
-)
+SITE = "https://booking.com"
+
+SEARCH_REQUEST = f"""
+Find hotels in Barcelona from {CHECKIN_DATE} to {CHECKOUT_DATE} for 2 people.
+A number of rooms: 1.
+
+Apply the following criteria:
+
+Accommodation type: hotels only, no apartment or other types;
+Use review score 8.0 or higher;
+Consider hotels with max. 150 euro per night, set currency = euro on the site;
+Find only hotels with air conditioning.
+"""
 
 
 async def main() -> None:
     print("=" * 60)
     print("Hotel search request:")
-    print(REQUEST.model_dump_json(indent=2))
+    print(SEARCH_REQUEST)
     print("=" * 60)
 
-    result = await search_hotels(REQUEST)
+    result = await search_hotels(SITE, SEARCH_REQUEST)
 
     print("\nResult:")
     print(json.dumps(result.model_dump(), indent=2))

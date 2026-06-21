@@ -2,29 +2,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-class HotelSearchInput(BaseModel):
-    destination: str = Field(
-        description="City, region, address, or specific hotel name, e.g. 'Paris' or 'Marriott Times Square'"
-    )
-    check_in: str = Field(description="Check-in date in YYYY-MM-DD format")
-    check_out: str = Field(description="Check-out date in YYYY-MM-DD format")
-    guests: int = Field(default=2, ge=1, le=30, description="Total number of guests (adults)")
-    rooms: int = Field(default=1, ge=1, le=10, description="Number of rooms required")
-    min_stars: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=5,
-        description="Minimum star rating filter (1–5). Omit to show all ratings.",
-    )
-    site: Optional[str] = Field(
-        default=None,
-        description=(
-            "URL of the hotel search site to use, e.g. 'https://www.booking.com'. "
-            "Defaults to Booking.com when omitted."
-        ),
-    )
-
-
 class HotelOffer(BaseModel):
     hotel_name: str = Field(description="Full name of the hotel or property")
     address: Optional[str] = Field(
