@@ -4,6 +4,7 @@ Run with:
     python test_scraper.py
 """
 import asyncio
+from datetime import datetime, timedelta
 import json
 import logging
 import sys
@@ -20,14 +21,18 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
+CHECKIN_DATE = (datetime.now() + timedelta(days=30)).date().isoformat()
+CHECKOUT_DATE = (datetime.now() + timedelta(days=37)).date().isoformat()
+
 REQUEST = HotelSearchInput(
     destination="Paris",
-    check_in="2026-06-15",
-    check_out="2026-06-22",
+    check_in=CHECKIN_DATE,
+    check_out=CHECKOUT_DATE,
     guests=2,
     rooms=1,
     min_stars=4,
-    site="https://www.hotels.com",  # uncomment to test a different site
+    # site="https://www.hotels.com",  # uncomment to test a different site
+    site="https://www.booking.com",  # uncomment to test a different site
 )
 
 

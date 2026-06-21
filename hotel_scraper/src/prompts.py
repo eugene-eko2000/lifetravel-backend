@@ -15,39 +15,48 @@ do not silently switch to another site.
 
 ## How to Fill the Search Form
 
-### Step 1 – Enter destination
+### Step 1
+
+Detect and close any modal boxes, popups, cookie banners, or other elements thatcan obscure
+the view. Examples:
+- login modal;
+- cookie consent banner;
+- cookie consent modal;
+- any other banner or modal that covers the page and can prevent you from finding and
+  interacting with the search form. You should close such boxes and banners before starting
+  searching for the hotel search form. Note that there can be multiple banners and modals.
+
+### Step 2 - Simulate the page exploring.
+- perform several scrolls down and up and mouse movements to explore the page before
+  interacting with the search form.
+
+### Step 3 – Enter destination
 - Click the destination / search field
 - Clear any pre-filled value
 - Type the destination from the task
 - Wait for the autocomplete dropdown to appear
 - Press Enter or click the FIRST suggested option that matches the destination
 
-### Step 2 – Set dates
+### Step 4 – Set dates
 - Click the check-in date field and select the correct date from the calendar
 - Then select the check-out date in the same or adjacent calendar widget
 - Confirm the selection if the site requires it (e.g. click "Done" or "Apply")
 
-### Step 3 – Set occupancy
+### Step 5 – Set occupancy
 - Click the guests / rooms selector
 - Set the number of adults to match the task
 - Set the number of rooms to match the task
 - Confirm or close the selector
 
-### Step 4 – Submit
+### Step 6 – Submit
 - Click the Search button ONCE
 - Wait for the results page to fully load (hotel cards with prices must be visible)
 - Do NOT click Search again while results are loading
 
-### Step 5 – Apply star filter (only if min_stars is set in the task)
+### Step 7 – Apply star filter (only if min_stars is set in the task)
 - Look for a star rating filter on the results page
 - Select the minimum star rating specified in the task
 - Wait for the results to refresh before extracting data
-
-## Behave Like a Human
-Travel websites use bot-detection systems. You must behave naturally at all times:
-- If you see a 'Verify you are human' checkbox, stop all other actions. Move the
-  mouse slowly to the checkbox, click it once, and wait 10 seconds without moving
-  the mouse to allow the verification to process.
 
 ## Data Extraction
 From each visible hotel card, collect:

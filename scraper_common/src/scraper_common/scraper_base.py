@@ -355,8 +355,8 @@ async def run_browser_agent(
                 #     # cross-origin cookie handshake work as they did pre-2025.
                 #     "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
                 # ],
-                ignore_default_args=["--enable-automation"],
-                user_agent=_USER_AGENT,
+                ignore_default_args=["--enable-automation", "--extensions-on-chrome-urls", "--disable-blink-features=AutomationControlled"],
+                # user_agent=_USER_AGENT,
                 # user_data_dir=cfg.user_data_dir or None,
                 wait_between_actions=cfg.wait_between_actions,
                 minimum_wait_page_load_time=cfg.min_page_load_wait,

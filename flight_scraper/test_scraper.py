@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scraper_common" / "src"))
@@ -20,12 +21,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
+DEPARTURE_DATE = (datetime.now() + timedelta(days=30)).date().isoformat()
+RETURN_DATE = (datetime.now() + timedelta(days=37)).date().isoformat()
+
 REQUEST = FlightSearchInput(
     origin="Zurich",
     destination="New York",
-    departure_date="2026-06-23",
-    return_date="2026-06-30",
-    # days_range=2,
+    departure_date=DEPARTURE_DATE,
+    return_date=RETURN_DATE,
     adults=1,
     children=0,
     cabin_class="economy",

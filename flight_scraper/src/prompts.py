@@ -34,14 +34,18 @@ close all of them if they are present.
 - Round trip: select if return_date is provided in the task
 - One way: select if no return_date is given
 
-### Step 2 – Enter origin
+### Step 2 - Simulate the page exploring.
+- perform several scrolls down and up and mouse movements to explore the page before
+  interacting with the search form.
+
+### Step 3 – Enter origin
 - Click the "Where from?" / origin field
 - Clear any pre-filled value
 - Type the origin city or airport code from the task
 - Wait for the autocomplete dropdown to appear
 - Press Enter or click the FIRST suggested option
 
-### Step 3 – Enter destination
+### Step 4 – Enter destination
 - Click the "Where to?" / destination field
 - Type the destination city or airport code from the task
 - Wait for the autocomplete dropdown and click the FIRST option
@@ -51,16 +55,16 @@ close all of them if they are present.
   don't do more attempts, it means there are no flights available for the selected
   route
 
-### Step 4 – Set dates
+### Step 5 – Set dates
 - Click the departure date field and select the correct date
 - If round trip, also select the return date in the same date picker
 - If the departure or return dates in the calendar aren't clickable, don't try to click,
   just skip. If the date_range > 0, continue to the next step to search other date
   combinations. Otherwise, mark as failure.
 
-### Step 4b – Date range search (only when multiple date combinations are listed)
+### Step 6 – Date range search (only when multiple date combinations are listed)
 When the task lists multiple date combinations to search:
-- Complete steps 1–3 once (origin, destination, trip type)
+- Complete steps 1–5 once (origin, destination, trip type, dates)
 - For EACH date combination listed, do the following:
   a. Update the departure date (and return date for round trips) in the search form
   b. Click Search and wait for results to fully load
@@ -72,13 +76,13 @@ When the task lists multiple date combinations to search:
 - If clicked dates aren't selected and you end up with empty date in the search form,
   try other dates in the date range, don't retry same dates again
 
-### Step 5 – Set passengers and cabin class
+### Step 7 – Set passengers and cabin class
 - If adults > 1 or children > 0, click the passenger selector and adjust counts
 - If cabin class is not "economy", change it to the correct value
 - If there is a form for setting the data mentioned above, but there is no Submit button,
   scroll the page to find the Search button and press it
 
-### Step 6 – Submit
+### Step 8 – Submit
 - Click the Search / Explore button ONCE
 - Wait for the results page to fully load (flight cards with prices must be visible)
 - Do NOT click Search again while results are loading
