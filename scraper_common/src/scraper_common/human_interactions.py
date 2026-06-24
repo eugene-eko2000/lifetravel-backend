@@ -1,9 +1,9 @@
 """
 Human-like interaction generation from recorded user interaction samples.
 
-Loads pre-recorded interaction data and synthesises realistic event sequences
-by finding the closest matching sample to a requested interaction and
-transforming its trajectory to fit the target start/end points.
+Synthesises realistic event sequences by finding the closest matching sample
+to a requested interaction and transforming its trajectory to fit the target
+start/end points.  Interaction data is loaded centrally via data_store.
 
 Usage
 -----
@@ -14,23 +14,17 @@ Usage
         await dispatch_mouse_move(step.x, step.y)
         if step.delay_ms > 0:
             await asyncio.sleep(step.delay_ms / 1000)
-
-Data directory defaults to scraper_common/data/ relative to this package.
-Pass data_dir explicitly to HumanInteractions(data_dir=...) to override.
 """
 
 import bisect
-import json
 import logging
 import math
 import random
-from pathlib import Path
 from typing import NamedTuple, Optional
 
-logger = logging.getLogger("scraper_common.human_interactions")
+from scraper_common import data_store
 
-# scraper_common/src/scraper_common/ → scraper_common/src/ → scraper_common/ → data/
-_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+logger = logging.getLogger("scraper_common.human_interactions")
 
 
 class MouseStep(NamedTuple):
@@ -45,12 +39,10 @@ class HumanInteractions:
     Generates human-like interaction event sequences from recorded samples.
 
     Instances are thread-safe for reads after the first call to any generate_*
-    method triggers lazy loading of the sample data.
+    method triggers lazy processing of the sample data.
     """
 
-    def __init__(self, data_dir: Optional[str | Path] = None) -> None:
-        self._data_dir = Path(data_dir) if data_dir is not None else _DATA_DIR
-
+    def __init__(self) -> None:
         self._mousemoves: Optional[list] = None
         self._length_index: Optional[dict[float, list[int]]] = None
         self._length_keys: Optional[list[float]] = None
@@ -63,19 +55,16 @@ class HumanInteractions:
         if self._mousemoves is not None:
             return
 
-        logger.info("Loading interaction samples from %s", self._data_dir)
+        logger.info("Processing interaction samples")
 
-        with open(self._data_dir / "processed.json") as f:
-            all_samples = json.load(f)
+        all_samples = data_store.get("processed")
         self._mousemoves = [s for s in all_samples if s["type"] == "mousemove"]
 
-        with open(self._data_dir / "movements_length_index.json") as f:
-            raw = json.load(f)
+        raw = data_store.get("movements_length_index")
         self._length_index = {float(k): v for k, v in raw.items()}
         self._length_keys = sorted(self._length_index)
 
-        with open(self._data_dir / "movements_direction_index.json") as f:
-            raw = json.load(f)
+        raw = data_store.get("movements_direction_index")
         self._direction_index = {float(k): v for k, v in raw.items()}
         self._direction_keys = sorted(self._direction_index)
 
@@ -298,6 +287,4 @@ class HumanInteractions:
         return self._transform(self._mousemoves[sample_idx], x1, y1, x2, y2)
 
 
-# Module-level singleton — configure data directory via INTERACTIONS_DATA_DIR
-# environment variable before the first call, or create your own instance.
 interactions = HumanInteractions()

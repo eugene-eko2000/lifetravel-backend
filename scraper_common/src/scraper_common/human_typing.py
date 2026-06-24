@@ -36,6 +36,43 @@ def _human_delay() -> float:
     return delay
 
 
+def _get_sample_delays(text_len: int) -> list[float]:
+    """
+    Load a recorded input sample whose length is closest to *text_len* and
+    return the inter-event intervals (in seconds) as a list.
+
+    If the sample has fewer intervals than the text is long the list is meant
+    to be consumed cyclically by the caller.  Returns [] on any error so the
+    caller can fall back to _human_delay().
+    """
+    try:
+        from scraper_common import data_store
+        input_index: dict = data_store.get("input_index")
+        processed: list = data_store.get("processed")
+
+        int_keys = sorted(int(k) for k in input_index)
+        closest = min(int_keys, key=lambda k: abs(k - text_len))
+        sample_idx = random.choice(input_index[str(closest)])
+        events = processed[sample_idx].get("events", [])
+
+        if len(events) < 2:
+            return []
+
+        delays = []
+        for i in range(len(events) - 1):
+            dt_s = (events[i + 1]["timestamp"] - events[i]["timestamp"]) / 1000.0
+            delays.append(max(dt_s, 0.001))
+
+        logger.debug(
+            "Loaded %d inter-keystroke delays from sample index %d (key=%d, text_len=%d)",
+            len(delays), sample_idx, closest, text_len,
+        )
+        return delays
+    except Exception as exc:
+        logger.debug("Failed to load sample delays, falling back to _human_delay(): %s", exc)
+        return []
+
+
 async def _pre_type_focus_sequence(cdp_session, cx: float, cy: float) -> None:
     """
     Execute the human-style pre-typing focus sequence at element centre (cx, cy).
@@ -185,7 +222,9 @@ def patch_watchdog_typing() -> None:
             except Exception as exc:
                 logger.debug("Pre-type focus sequence failed, proceeding without it: %s", exc)
 
-            for char in text:
+            sample_delays = _get_sample_delays(len(text))
+
+            for char_idx, char in enumerate(text):
                 if char == "\n":
                     for params in [
                         {"type": "keyDown", "key": "Enter", "code": "Enter",
@@ -206,7 +245,11 @@ def patch_watchdog_typing() -> None:
                         await cdp_session.cdp_client.send.Input.dispatchKeyEvent(
                             params=params, session_id=cdp_session.session_id
                         )
-                await _real_asyncio.sleep(_human_delay())
+                if sample_delays:
+                    delay = sample_delays[char_idx % len(sample_delays)]
+                else:
+                    delay = _human_delay()
+                await _real_asyncio.sleep(delay)
         except Exception as exc:
             raise Exception(f"Failed to type to page: {exc}") from exc
 

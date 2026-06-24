@@ -46,17 +46,15 @@ operator can watch the simulated motion in the visible browser window:
 """
 
 import asyncio
-import functools
-import json
 import math
 import os
 import random
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from scraper_common import data_store
 from scraper_common.human_interactions import interactions as _interactions
 
 logger = logging.getLogger("scraper_common.human_mouse")
@@ -135,17 +133,8 @@ _click_pattern: ContextVar[Optional[list]] = ContextVar(
 
 # ── Recorded click data ───────────────────────────────────────────────────────
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "data"
-
-
-@functools.lru_cache(maxsize=None)
 def _load_click_data() -> tuple[dict, list]:
-    """Lazily load and cache click_index.json and processed.json."""
-    with open(_DATA_DIR / "click_index.json") as f:
-        click_index = json.load(f)
-    with open(_DATA_DIR / "processed.json") as f:
-        processed = json.load(f)
-    return click_index, processed
+    return data_store.get("click_index"), data_store.get("processed")
 
 
 def _extract_click_pattern(sample: dict) -> list[dict]:
