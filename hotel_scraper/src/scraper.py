@@ -75,7 +75,6 @@ async def search_hotels(site: str, search_input: str) -> HotelSearchResponse:
     return HotelSearchResponse(
         success=scraped.success,
         error=scraped.error,
-        search_params=search_input,
         offers=offers,
         result_count=len(offers),
         source=scraped.source,

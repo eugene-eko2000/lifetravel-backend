@@ -66,7 +66,6 @@ class HotelSearchResponse(BaseModel):
     """Full API response returned to the caller."""
     success: bool
     error: Optional[str] = None
-    search_params: HotelSearchInput
     offers: list[HotelOffer]
     result_count: int
     source: str
