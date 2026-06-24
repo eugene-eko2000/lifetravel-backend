@@ -46,12 +46,15 @@ operator can watch the simulated motion in the visible browser window:
 """
 
 import asyncio
+import functools
+import json
 import math
 import os
 import random
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from scraper_common.human_interactions import interactions as _interactions
@@ -121,6 +124,81 @@ def set_click_hold_override(duration: Optional[float]) -> None:
     if duration is not None and duration < 0:
         raise ValueError(f"click_hold duration must be ≥ 0, got {duration}")
     _click_hold_override.set(duration)
+
+
+# Per-task click pattern for the current mousedown→mouseup hold phase.
+# None  → use simple hold (without_mouse_move path).
+# list  → replay recorded mousemove steps relative to the press position.
+_click_pattern: ContextVar[Optional[list]] = ContextVar(
+    "_human_mouse_click_pattern", default=None
+)
+
+# ── Recorded click data ───────────────────────────────────────────────────────
+
+_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+
+
+@functools.lru_cache(maxsize=None)
+def _load_click_data() -> tuple[dict, list]:
+    """Lazily load and cache click_index.json and processed.json."""
+    with open(_DATA_DIR / "click_index.json") as f:
+        click_index = json.load(f)
+    with open(_DATA_DIR / "processed.json") as f:
+        processed = json.load(f)
+    return click_index, processed
+
+
+def _extract_click_pattern(sample: dict) -> list[dict]:
+    """
+    Extract relative mousemove + mouseup events from a recorded compound click.
+    Coordinates are expressed as offsets from the mousedown position; timing is
+    in milliseconds from mousedown.
+    """
+    events = sample.get("events", [])
+    mousedown = next((e for e in events if e["type"] == "mousedown"), None)
+    if not mousedown:
+        return []
+    ref_t = mousedown["timestamp"]
+    ref_x = mousedown["x"]
+    ref_y = mousedown["y"]
+    pattern: list[dict] = []
+    for ev in events:
+        if ev["type"] == "mousemove":
+            pattern.append({
+                "type": "mousemove",
+                "rel_x": ev["x"] - ref_x,
+                "rel_y": ev["y"] - ref_y,
+                "delay_ms": ev["timestamp"] - ref_t,
+            })
+        elif ev["type"] == "mouseup":
+            pattern.append({
+                "type": "mouseup",
+                "rel_x": ev["x"] - ref_x,
+                "rel_y": ev["y"] - ref_y,
+                "delay_ms": ev["timestamp"] - ref_t,
+            })
+            break
+    return pattern
+
+
+def _pick_click_pattern() -> Optional[list]:
+    """
+    Randomly choose a click style:
+      50 % — with mouse move: pick a recorded sample and return its pattern.
+      50 % — without mouse move: return None (simple hold, no movement).
+    """
+    if random.random() < 0.5:
+        try:
+            click_index, processed = _load_click_data()
+            sample_idx = random.choice(click_index["with_mouse_move"])
+            sample = processed[sample_idx]
+            pattern = _extract_click_pattern(sample)
+            if pattern:
+                return pattern
+        except Exception:
+            logger.debug("Failed to load recorded click pattern; using simple hold")
+    return None
+
 
 # ── Post-release lift-off tuning ──────────────────────────────────────────────
 _LIFT_DELAY_MIN_S = 0.018   # pause before the post-release drift move
@@ -393,6 +471,9 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
                 self._client, session_id, target_x, target_y
             )
 
+            # Choose with/without-mouse-move style for the upcoming hold phase.
+            _click_pattern.set(_pick_click_pattern())
+
             # Cursor already on the target → no hover, no offset; just dwell
             # and click at the cursor's actual position.
             if (
@@ -462,26 +543,62 @@ def patch_mouse_movement(visualize: Optional[bool] = None) -> None:
             _emit_viz(self._client, session_id, click_x, click_y, "press")
             return await _orig(self, {**params, "x": click_x, "y": click_y, "pointerType": "mouse"}, session_id=session_id)
 
-        # ── mouseReleased → hold delay + release at press position + lift-off ─
+        # ── mouseReleased → recorded hold pattern or simple hold + lift-off ──
         if event_type == "mouseReleased":
-            # Hold for either the caller-supplied override (click-and-hold) or
-            # the default random 50–150 ms range (real human click duration).
             override = _click_hold_override.get()
-            if override is not None:
-                hold_s = float(override)
-                logger.debug("Click hold %.0f ms (override) before mouseup", hold_s * 1000)
-            else:
-                hold_s = random.uniform(_CLICK_HOLD_MIN_S, _CLICK_HOLD_MAX_S)
-                logger.debug("Click hold %.0f ms before mouseup", hold_s * 1000)
-            await asyncio.sleep(hold_s)
+            pattern = _click_pattern.get()
+            _click_pattern.set(None)
 
-            # Match the (possibly offset) coordinates used at press time
-            result = await _orig(
-                self,
-                {**params, "x": round(_mouse_x), "y": round(_mouse_y), "pointerType": "mouse"},
-                session_id=session_id,
-            )
-            _emit_viz(self._client, session_id, _mouse_x, _mouse_y, "release")
+            if pattern and override is None:
+                # Replay recorded mouse movements during the button hold.
+                # Coordinates in the pattern are relative to the mousedown position.
+                base_x = round(_mouse_x)
+                base_y = round(_mouse_y)
+                last_delay_ms = 0
+                final_x, final_y = base_x, base_y
+
+                for step in pattern:
+                    wait_s = (step["delay_ms"] - last_delay_ms) / 1000.0
+                    if wait_s > 0:
+                        await asyncio.sleep(wait_s)
+                    last_delay_ms = step["delay_ms"]
+
+                    abs_x = round(base_x + step["rel_x"])
+                    abs_y = round(base_y + step["rel_y"])
+                    final_x, final_y = abs_x, abs_y
+
+                    if step["type"] == "mousemove":
+                        await self._client.send_raw(
+                            method="Input.dispatchMouseEvent",
+                            params=_move_params(abs_x, abs_y, buttons=1),
+                            session_id=session_id,
+                        )
+                        _emit_viz(self._client, session_id, abs_x, abs_y, "move")
+                    # mouseup step: just captures the final position/timing
+
+                result = await _orig(
+                    self,
+                    {**params, "x": final_x, "y": final_y, "pointerType": "mouse"},
+                    session_id=session_id,
+                )
+                _emit_viz(self._client, session_id, final_x, final_y, "release")
+                _mouse_x, _mouse_y = float(final_x), float(final_y)
+            else:
+                # Simple hold: wait then release at the press position.
+                if override is not None:
+                    hold_s = float(override)
+                    logger.debug("Click hold %.0f ms (override) before mouseup", hold_s * 1000)
+                else:
+                    hold_s = random.uniform(_CLICK_HOLD_MIN_S, _CLICK_HOLD_MAX_S)
+                    logger.debug("Click hold %.0f ms before mouseup", hold_s * 1000)
+                await asyncio.sleep(hold_s)
+
+                result = await _orig(
+                    self,
+                    {**params, "x": round(_mouse_x), "y": round(_mouse_y), "pointerType": "mouse"},
+                    session_id=session_id,
+                )
+                _emit_viz(self._client, session_id, _mouse_x, _mouse_y, "release")
 
             # Natural finger rebound after releasing the button
             await asyncio.sleep(random.uniform(_LIFT_DELAY_MIN_S, _LIFT_DELAY_MAX_S))
