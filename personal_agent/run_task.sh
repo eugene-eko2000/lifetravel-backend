@@ -124,8 +124,8 @@ From each visible hotel card, collect:
 - Cancellation policy summary (e.g. \"Free cancellation\", \"Non-refundable\")
 - URL to the hotel detail page (if available in the card)
 
-Collect the first 5–15 results. Scroll down to reveal more if fewer than 5 are visible.
-If a \"Load more\" or pagination control is present, use it once to get additional results.
+Collect all results. Scroll down to reveal more if fewer than 5 are visible.
+Also, go through all result pages to check all available results.
 
 ## STOP IMMEDIATELY and return success=false if ANY of the following occur:
 1. The search form cannot be found after 3 location attempts
