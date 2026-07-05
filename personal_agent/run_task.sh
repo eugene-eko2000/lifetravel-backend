@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TASK="
-Please find a hotel in Barcelona using https://www.hotels.com.
+Please find a hotel in Barcelona using https://www.booking.com.
 
 You have to find a hotel in Barcelona from 2026-08-30 to 2026-09-04.
 Before starting search, make sure you set the currency to Euro.
@@ -68,14 +68,20 @@ strict, but you should apply all filters that are specified in the task.
 
 ### Apply star filter (only if set in the task)
 - Look for a star rating filter on the results page
+- Check if all accommodations on the page already have the star rating matching the criteria,
+  if yes, skip setting the filter
 - Select the minimum star rating specified in the task
 
 ### Apply review score or rating filter (only if set in the task)
 - Look for a review score / guest rating filter on the results page
+- Check if all accommodations on the page already have the review score matching the criteria,
+  if yes, skip setting the filter
 - Select the threshold that matches or is closest to the value in the task
 
 ### Apply accommodation type filter (only if accommodation_types is set in the task)
 - Look for a property type / accommodation type filter on the results page
+- Check if all accommodations on the page already have the accommodation type matching the criteria,
+  if yes, skip setting the filter
 - Select only the types listed in the task (e.g. \"Hotels\", \"Apartments\", \"Hostels\")
 
 ### Apply amenity filters (only if amenities are set in the task)
@@ -84,10 +90,13 @@ strict, but you should apply all filters that are specified in the task.
 
 ### Apply price filter (only if min or max price is set in the task)
 - Look for a price range / budget Dual-Handle Slider or input on the results page
+- Check that it suggests setting prices per night or per the whole stay. Adjust the values accordingly if needed.
 - Set the lower bound if min price is provided
 - Set the upper bound if max_ price is provided
 - If you cannot find the price filter, consider checking the results list and filtering
   results with a price matching the criteria
+- When checking prices after setting the filter, note that hotels in tle list display prices per the whole
+  stay, but the filter may be per night. Adjust your checks accordingly.
 
 ## General Instructions
 

@@ -23,6 +23,7 @@ from scraper_common.human_typing import patch_watchdog_typing
 from scraper_common.human_mouse import patch_mouse_movement
 from scraper_common.human_scrolling import patch_scroll_page
 from scraper_common.model_tracer import ModelTracer
+from scraper_common.patch_model_errors import patch_model_provider_error_logging
 
 # Apply human-like interaction patches before any Agent is instantiated.
 # mouse MUST be patched first — the typing patch calls dispatchMouseEvent for
@@ -31,6 +32,7 @@ from scraper_common.model_tracer import ModelTracer
 patch_mouse_movement()
 patch_watchdog_typing()
 patch_scroll_page()
+patch_model_provider_error_logging()
 
 def _system_browser_executable(channel: str | None) -> str | None:
     """Return the path to the system-installed browser for the given channel, or None."""
