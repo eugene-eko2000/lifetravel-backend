@@ -81,6 +81,9 @@ _CLICK_FALLBACK_SIGMA_PX = 4.0   # fallback Gaussian offset when no bounding box
 _CLICK_HOLD_MIN_S = 0.050   # min time the button stays pressed (default range)
 _CLICK_HOLD_MAX_S = 0.150   # max time the button stays pressed (default range)
 
+# ── Click-hold movement constraint ────────────────────────────────────────────
+_CLICK_MAX_MOVE_PX = 10.0   # max total mousemove path (px) allowed between mousedown and mouseup
+
 # Per-task override for the click-hold duration. When set, the next
 # mouseReleased event will hold the button down for exactly this many seconds
 # instead of drawing from the default 50–150 ms range. Backed by a ContextVar
@@ -170,6 +173,39 @@ def _extract_click_pattern(sample: dict) -> list[dict]:
     return pattern
 
 
+def _truncate_click_pattern(pattern: list[dict]) -> list[dict]:
+    """
+    Enforce the _CLICK_MAX_MOVE_PX constraint on a click pattern.
+
+    Walks the mousemove steps (coordinates are relative to mousedown) and drops
+    any step that would push the cumulative path length past the limit.  The
+    terminal mouseup step is always re-appended so the pattern remains valid.
+    """
+    moves = [e for e in pattern if e["type"] == "mousemove"]
+    mouseup = next((e for e in pattern if e["type"] == "mouseup"), None)
+
+    total = 0.0
+    kept: list[dict] = []
+    prev_x, prev_y = 0.0, 0.0
+    for step in moves:
+        dist = math.hypot(step["rel_x"] - prev_x, step["rel_y"] - prev_y)
+        if total + dist > _CLICK_MAX_MOVE_PX:
+            break
+        total += dist
+        kept.append(step)
+        prev_x, prev_y = step["rel_x"], step["rel_y"]
+
+    if mouseup:
+        kept.append(mouseup)
+
+    if len(moves) != len(kept) - (1 if mouseup else 0):
+        logger.debug(
+            "Click pattern truncated: %d → %d mousemove steps (total %.1fpx > %.0fpx limit)",
+            len(moves), len(kept) - (1 if mouseup else 0), total, _CLICK_MAX_MOVE_PX,
+        )
+    return kept
+
+
 def _pick_click_pattern() -> Optional[list]:
     """
     Randomly choose a click style:
@@ -183,7 +219,7 @@ def _pick_click_pattern() -> Optional[list]:
             sample = processed[sample_idx]
             pattern = _extract_click_pattern(sample)
             if pattern:
-                return pattern
+                return _truncate_click_pattern(pattern)
         except Exception:
             logger.debug("Failed to load recorded click pattern; using simple hold")
     return None
