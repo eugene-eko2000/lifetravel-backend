@@ -347,14 +347,14 @@ async def run_browser_agent(
                 headless=cfg.headless,
                 channel=cfg.browser_channel,
                 executable_path=_system_browser_executable(cfg.browser_channel),
-                # args=[
-                #     "--disable-blink-features=AutomationControlled",
-                #     # Cookies enabled — disable Chrome 136+ Tracking Protection
-                #     # (which blocks third-party cookies by default) and storage
-                #     # partitioning, so auth flows, embedded widgets and any
-                #     # cross-origin cookie handshake work as they did pre-2025.
-                #     "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
-                # ],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    # Cookies enabled — disable Chrome 136+ Tracking Protection
+                    # (which blocks third-party cookies by default) and storage
+                    # partitioning, so auth flows, embedded widgets and any
+                    # cross-origin cookie handshake work as they did pre-2025.
+                    "--disable-features=TrackingProtection3pcd,ThirdPartyStoragePartitioning",
+                ],
                 ignore_default_args=["--enable-automation", "--extensions-on-chrome-urls", "--disable-blink-features=AutomationControlled"],
                 # user_agent=_USER_AGENT,
                 # user_data_dir=cfg.user_data_dir or None,

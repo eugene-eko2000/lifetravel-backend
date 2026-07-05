@@ -2,11 +2,10 @@
 set -euo pipefail
 
 TASK="
-Please find a hotel in Barcelona using https://www.booking.com.
+Please find a hotel in Barcelona using https://www.hotels.com.
 
 You have to find a hotel in Barcelona from 2026-08-30 to 2026-09-04.
-Before starting search, make sure you set the country to Germany, language to English and
-currency to Euro.
+Before starting search, make sure you set the currency to Euro.
 
 Filter the search with hotels only with review score more than or equal to 8.0 and
 price <= 150 Euro.
@@ -22,9 +21,12 @@ The URL to use is provided in the task. Navigate there first.
 If the site is blocked, unavailable, or showing a CAPTCHA, report failure immediately —
 do not silently switch to another site.
 
-## How to Fill the Search Form
+## Performing the search form filling and submission
 
-### Step 1
+You will need to do following steps with entering user's data into the search form
+before submission, not necessary in a strict order, just a list of actions below.
+
+### Initial Detection.
 
 Detect and close any modal boxes, popups, cookie banners, or other elements thatcan obscure
 the view. Examples:
@@ -35,58 +37,57 @@ the view. Examples:
   interacting with the search form. You should close such boxes and banners before starting
   searching for the hotel search form. Note that there can be multiple banners and modals.
 
-### Step 2 - Simulate the page exploring.
+### Simulate the page exploring.
 - perform several scrolls down and up and mouse movements to explore the page before
   interacting with the search form.
 
-### Step 3 – Enter destination
+### Enter destination
 - Click the destination / search field
 - Clear any pre-filled value
 - Type the destination from the task
 - Wait for the autocomplete dropdown to appear
 - Press Enter or click the FIRST suggested option that matches the destination
 
-### Step 4 – Set dates
+### Set dates
 - Click the check-in date field and select the correct date from the calendar
 - Then select the check-out date in the same or adjacent calendar widget
 - Confirm the selection if the site requires it (e.g. click \"Done\" or \"Apply\")
-
-### Step 5 – Set occupancy
+  
+### Set occupancy
 - Click the guests / rooms selector
 - Set the number of adults to match the task
 - Set the number of rooms to match the task
 - Confirm or close the selector
 
-### Step 6 – Submit
-- Click the Search button ONCE
-- Wait for the results page to fully load (hotel cards with prices must be visible)
-- Do NOT click Search again while results are loading
+## Setting extra filters.
 
-### Step 7 – Apply star filter (only if min_stars is set in the task)
+If the task specifies additional filters (e.g. star rating, review score, accommodation
+type, etc., you will need to apply them after the initial search results are displayed.
+There is a list of possible filtering actions below, the order of applying them is not
+strict, but you should apply all filters that are specified in the task.
+
+### Apply star filter (only if set in the task)
 - Look for a star rating filter on the results page
 - Select the minimum star rating specified in the task
-- Wait for the results to refresh before proceeding
 
-### Step 8 – Apply review score filter (only if min_review_score is set in the task)
+### Apply review score or rating filter (only if set in the task)
 - Look for a review score / guest rating filter on the results page
 - Select the threshold that matches or is closest to the value in the task
-- Wait for the results to refresh before proceeding
 
-### Step 9 – Apply accommodation type filter (only if accommodation_types is set in the task)
+### Apply accommodation type filter (only if accommodation_types is set in the task)
 - Look for a property type / accommodation type filter on the results page
 - Select only the types listed in the task (e.g. \"Hotels\", \"Apartments\", \"Hostels\")
-- Wait for the results to refresh before proceeding
 
-### Step 10 – Apply amenity filters (only if amenities are set in the task)
+### Apply amenity filters (only if amenities are set in the task)
 - Look for a facilities / amenities filter panel on the results page
 - Enable each amenity listed in the task (e.g. \"Parking\", \"Air conditioning\", \"Swimming pool\")
-- Wait for the results to refresh after applying all amenity filters
 
-### Step 11 – Apply price filter (only if min_price_per_night or max_price_per_night is set in the task)
+### Apply price filter (only if min or max price is set in the task)
 - Look for a price range / budget Dual-Handle Slider or input on the results page
-- Set the lower bound if min_price_per_night is provided
-- Set the upper bound if max_price_per_night is provided
-- Wait for the results to refresh before extracting data
+- Set the lower bound if min price is provided
+- Set the upper bound if max_ price is provided
+- If you cannot find the price filter, consider checking the results list and filtering
+  results with a price matching the criteria
 
 ## General Instructions
 
@@ -95,7 +96,7 @@ the view. Examples:
   then check its status. Don't verify if the check is applied.
 - If the page content changes after filter settings click, consider it intended, don't
   try to re-click.
-- If the option is still clickable, it means no need to re-click it.
+- Check if the checkbox is in "on" state, don't click it if yes.
 
 Some settings can be a slider e.g. min / max price. Consider interacting with it.
 
