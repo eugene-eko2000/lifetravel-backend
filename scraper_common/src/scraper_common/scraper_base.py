@@ -24,6 +24,7 @@ from scraper_common.human_mouse import patch_mouse_movement
 from scraper_common.human_scrolling import patch_scroll_page
 from scraper_common.model_tracer import ModelTracer
 from scraper_common.patch_model_errors import patch_model_provider_error_logging
+from scraper_common.patch_llm_io_trace import LlmIoTracer, patch_llm_io_trace
 
 # Apply human-like interaction patches before any Agent is instantiated.
 # mouse MUST be patched first — the typing patch calls dispatchMouseEvent for
@@ -33,6 +34,7 @@ patch_mouse_movement()
 patch_watchdog_typing()
 patch_scroll_page()
 patch_model_provider_error_logging()
+patch_llm_io_trace()
 
 def _system_browser_executable(channel: str | None) -> str | None:
     """Return the path to the system-installed browser for the given channel, or None."""
@@ -178,6 +180,9 @@ async def run_browser_agent(
 
     effective_trace_file = trace_file or cfg.trace_file or None
     tracer = ModelTracer(effective_trace_file) if effective_trace_file else None
+
+    io_trace_file = cfg.llm_io_trace_file or None
+    io_tracer = LlmIoTracer(io_trace_file) if io_trace_file else None
 
     # Per-run tracking state for cycle detection
     url_visit_counts: Counter[str] = Counter()
@@ -373,11 +378,13 @@ async def run_browser_agent(
                 extend_system_message=system_prompt_extension,
                 output_model_schema=output_model_schema,
                 loop_detection_enabled=True,
-                loop_detection_window=10,
-                max_failures=3,
+                loop_detection_window=100,
+                max_failures=30,
                 register_should_stop_callback=should_stop,
                 register_new_step_callback=on_new_step,
             )
+            if io_tracer is not None:
+                agent._llm_io_tracer = io_tracer
 
             async def on_step_start(agent: Agent) -> None:
                 await apply_stealth(agent)
@@ -396,6 +403,8 @@ async def run_browser_agent(
         finally:
             if tracer is not None:
                 tracer.close()
+            if io_tracer is not None:
+                io_tracer.close()
             # Only stop browsers we launched ourselves — leave externally-attached
             # ones running for the next call / for the operator to inspect.
             if owned_browser:

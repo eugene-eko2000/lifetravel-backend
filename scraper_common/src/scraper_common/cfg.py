@@ -51,6 +51,8 @@ class Cfg:
     log_level: str
     # Path to a JSONL file for tracing every LLM response. Empty = disabled.
     trace_file: str
+    # Path to a text file for tracing raw LLM inputs and outputs. Empty = disabled.
+    llm_io_trace_file: str
 
     @classmethod
     def from_env(cls, default_port: int = 8080) -> "Cfg":
@@ -83,4 +85,5 @@ class Cfg:
             captcha_solver_service=os.getenv("CAPTCHA_SOLVER_SERVICE", "2captcha").lower().strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper().strip(),
             trace_file=os.getenv("TRACE_FILE", "").strip(),
+            llm_io_trace_file=os.getenv("LLM_IO_TRACE_FILE", "").strip(),
         )
